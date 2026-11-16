@@ -232,7 +232,7 @@ COMMENT 'Admin key/value settings (e.g. prompt_profile)';
 
 -- ---------------------------------------------------------------------------
 -- Permission ledger: resource permissions AI Mapper granted when an admin assigned
--- a role (app, warehouse, Genie, KA endpoint, Vector Search, UC schema/tables).
+-- a role (app, warehouse, Genie, Vector Search, UC schema/tables).
 -- Removing or lowering a role revokes only grants recorded here.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS aimapper_permission_grants (

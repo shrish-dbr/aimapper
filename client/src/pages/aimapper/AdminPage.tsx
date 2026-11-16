@@ -24,8 +24,8 @@ import {
   TabsContent,
 } from '@databricks/appkit-ui/react';
 import { SearchableSelect } from './SearchableSelect';
-import { ShieldAlert, UserPlus, Trash2, Info, RefreshCw, Plus, Users, KeyRound } from 'lucide-react';
-import { api, type Role, type RoleAssignment, type KaDetails, type Vendor, type PromptProfile, type PrincipalType, type WorkspacePrincipals, type PermissionResult } from '../../lib/aimapperApi';
+import { ShieldAlert, UserPlus, Trash2, Info, RefreshCw, Plus, Users, KeyRound, Pencil, Check, X } from 'lucide-react';
+import { api, type Role, type RoleGroup, type RoleMember, type Vendor, type PromptProfile, type WorkspacePrincipals, type PermissionResult } from '../../lib/aimapperApi';
 import { PrincipalPicker, type PickedPrincipal } from './PrincipalPicker';
 import { useRole } from '../../lib/roleContext';
 import { ConfigPanel } from './ConfigPage';
@@ -65,8 +65,8 @@ const ADMIN_TABS: { value: string; label: string }[] = [
   { value: 'sourceSystems', label: 'Source systems' },
   { value: 'vendors', label: 'Vendors' },
   { value: 'config', label: 'Target schema' },
-  { value: 'ka', label: 'Knowledge Assistant' },
-  { value: 'retrieval', label: 'Vector index' },
+  { value: 'referenceIndex', label: 'Document search' },
+  { value: 'retrieval', label: 'Example search' },
   { value: 'promptSizing', label: 'Tuning' },
   { value: 'usage', label: 'Usage' },
 ];
@@ -106,18 +106,6 @@ function roleBadge(role: string) {
   return <StatusPill tone={tone}>{role.charAt(0).toUpperCase() + role.slice(1)}</StatusPill>;
 }
 
-// --- Knowledge Assistant admin panel ---------------------------------------
-// The KA REST resource shape isn't strongly typed, so read known fields
-// defensively and fall back gracefully.
-function str(o: Record<string, unknown> | null | undefined, ...keys: string[]): string | null {
-  if (!o) return null;
-  for (const k of keys) {
-    const v = o[k];
-    if (typeof v === 'string' && v.trim()) return v;
-  }
-  return null;
-}
-
 /** Format an ISO/epoch timestamp as a short local date-time, or "never". */
 function fmtWhen(v: string | number | null | undefined): string {
   if (v == null || v === '') return 'never';
@@ -125,190 +113,10 @@ function fmtWhen(v: string | number | null | undefined): string {
   return Number.isNaN(d.getTime()) ? String(v) : d.toLocaleString();
 }
 
-function kaStatusBadge(status: string | null) {
-  const s = (status ?? '').toUpperCase();
-  if (s === 'ONLINE' || s === 'READY' || s === 'ACTIVE') return <StatusPill tone="success">{status}</StatusPill>;
-  if (s === 'CREATING' || s === 'UPDATING' || s.includes('SYNC') || s.includes('PENDING')) return <StatusPill tone="warning">{status}</StatusPill>;
-  if (s === 'OFFLINE' || s.includes('FAIL') || s.includes('ERROR')) return <StatusPill tone="danger">{status}</StatusPill>;
-  return <StatusPill tone="neutral">{status ?? 'Unknown'}</StatusPill>;
-}
-
-/** Extract knowledge-source rows from the raw KA resource. The KA API exposes a
- * `state` per source and the volume `files.path`, but no last-sync timestamp. */
-function kaSources(details: Record<string, unknown> | null): { name: string; status: string | null; path: string | null }[] {
-  if (!details) return [];
-  const raw = details.knowledge_sources ?? details.sources;
-  if (!Array.isArray(raw)) return [];
-  return raw.map((s) => {
-    const o = s as Record<string, unknown>;
-    const files = (o.files ?? null) as Record<string, unknown> | null;
-    return {
-      name: str(o, 'display_name', 'name') ?? '(source)',
-      status: str(o, 'state', 'status'),
-      path: str(files, 'path'),
-    };
-  });
-}
-
-function KnowledgeAssistantPanel() {
-  const [data, setData] = useState<KaDetails | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [msg, setMsg] = useState<string | null>(null);
-  const [syncing, setSyncing] = useState(false);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      setData(await api.kaDetails());
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => { void load(); }, [load]);
-
-  async function handleSync() {
-    setSyncing(true);
-    setMsg(null);
-    setError(null);
-    try {
-      await api.referenceDocs.sync();
-      setMsg('Re-sync started. Indexing takes a few minutes; refresh to see the updated status.');
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setSyncing(false);
-    }
-  }
-
-  if (loading) return <div className="space-y-2"><Skeleton className="h-8 w-full" /><Skeleton className="h-24 w-full" /></div>;
-
-  if (data && !data.configured) {
-    return (
-      <Alert>
-        <Info className="h-4 w-4" />
-        <AlertTitle>Knowledge Assistant not configured</AlertTitle>
-        <AlertDescription>
-          <p>
-          Reference-document grounding is disabled. To enable it, run <Code>setup/create_ka.sh</Code> and set{' '}
-          <Code>AIMAPPER_KA_ENDPOINT</Code> (and <Code>AIMAPPER_KA_ID</Code> for re-sync) in <Code>app.yaml</Code>.
-          </p>
-        </AlertDescription>
-      </Alert>
-    );
-  }
-
-  const details = data?.details ?? null;
-  const status = str(details, 'state', 'status');
-  const displayName = str(details, 'display_name') ?? 'Reference Docs';
-  // create_time may be an ISO string (CLI shape) or ms-epoch number (SP shape).
-  const createdRaw = details?.create_time ?? details?.created_at ?? null;
-  const created =
-    typeof createdRaw === 'number' ? new Date(createdRaw).toISOString().slice(0, 16).replace('T', ' ')
-    : typeof createdRaw === 'string' && createdRaw ? createdRaw.slice(0, 16).replace('T', ' ')
-    : null;
-  const sources = kaSources(details);
-
-  return (
-    <div className="space-y-6">
-      {error && (
-        <Alert variant="destructive">
-          <ShieldAlert className="h-4 w-4" />
-          <AlertTitle>Error</AlertTitle>
-          <AlertDescription>{error}</AlertDescription>
-        </Alert>
-      )}
-
-      <Card>
-        <CardHeader className="flex-row items-center justify-between">
-          <div>
-            <CardTitle className="text-base">{displayName}</CardTitle>
-            <CardDescription>Grounds attribute discovery and SQL generation on your reference documents.</CardDescription>
-          </div>
-          <div className="flex items-center gap-3">
-            {kaStatusBadge(status)}
-            {data?.canSync && (
-              <Button size="sm" onClick={() => void handleSync()} disabled={syncing}>
-                <RefreshCw className={`h-4 w-4 mr-1.5 ${syncing ? 'animate-spin' : ''}`} /> Re-sync
-              </Button>
-            )}
-          </div>
-        </CardHeader>
-        <CardContent className="border-t pt-4">
-          <dl className="grid grid-cols-1 sm:grid-cols-[11rem_1fr] gap-x-6 gap-y-3 text-sm items-center">
-            <dt className="text-muted-foreground">Query endpoint</dt>
-            <dd className="font-mono text-xs break-all">{data?.endpoint ?? '—'}</dd>
-            <dt className="text-muted-foreground">KA id</dt>
-            <dd className="font-mono text-xs break-all">{data?.kaId ?? '—'}</dd>
-            <dt className="text-muted-foreground">Documents volume</dt>
-            <dd className="font-mono text-xs break-all">{data?.volume ?? '—'}</dd>
-            {created && (<><dt className="text-muted-foreground">Created</dt><dd className="text-xs">{created}</dd></>)}
-            {data?.canSync && (
-              <>
-                <dt className="text-muted-foreground">Sync state</dt>
-                <dd>
-                  {syncing || (data?.syncState ?? '').toUpperCase() === 'UPDATING'
-                    ? <StatusPill tone="warning">Syncing…</StatusPill>
-                    : (data?.syncState ?? '').toUpperCase() === 'UPDATED'
-                    ? <StatusPill tone="success">Up to date</StatusPill>
-                    : <StatusPill tone="neutral">Unknown</StatusPill>}
-                </dd>
-                <dt className="text-muted-foreground">Last synced</dt>
-                <dd className="text-xs">{fmtWhen(data?.lastSyncedAt)}</dd>
-              </>
-            )}
-          </dl>
-          {msg && <p className="text-sm text-muted-foreground mt-3">{msg}</p>}
-          {!details && (
-            <p className="text-xs text-muted-foreground mt-3">
-              Live KA status is unavailable (the assistant may be unreachable or still provisioning). The configuration
-              above is taken from the app environment.
-            </p>
-          )}
-        </CardContent>
-      </Card>
-
-      {sources.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Knowledge sources</CardTitle>
-            <CardDescription>Document sources indexed by the assistant.</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Source</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Volume path</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {sources.map((s, i) => (
-                  // eslint-disable-next-line react/no-array-index-key -- KA source order is stable and names may repeat
-                  <TableRow key={`${s.name}-${i}`}>
-                    <TableCell className="text-sm font-medium">{s.name}</TableCell>
-                    <TableCell>{kaStatusBadge(s.status)}</TableCell>
-                    <TableCell className="text-xs text-muted-foreground break-all">{s.path ?? '—'}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
-      )}
-    </div>
-  );
-}
-
 // --- Source systems admin panel --------------------------------------------
 function SourceSystemsPanel() {
-  const [sourceSystems, setSourceSystems] = useState<string[]>([]);
+  const [sourceSystems, setSourceSystems] = useState<{ name: string; description: string | null; isDefault: boolean }[]>([]);
+  const [editing, setEditing] = useState<{ name: string; newName: string; description: string } | null>(null);
   const [defaultSourceSystem, setDefaultSourceSystem] = useState('Epic');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -322,7 +130,11 @@ function SourceSystemsPanel() {
     setError(null);
     try {
       const d = await api.sourceSystems();
-      setSourceSystems(d.sourceSystems);
+      setSourceSystems(
+        d.details?.length
+          ? d.details
+          : d.sourceSystems.map((name) => ({ name, description: null, isDefault: name.toLowerCase() === d.defaultSourceSystem.toLowerCase() })),
+      );
       setDefaultSourceSystem(d.defaultSourceSystem);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -344,6 +156,28 @@ function SourceSystemsPanel() {
       setMsg(`Source system '${name}' created.`);
       setNewName('');
       setNewDesc('');
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleSave() {
+    if (!editing) return;
+    const newName = editing.newName.trim();
+    if (!newName) { setError('Enter a source system name.'); return; }
+    setBusy(true);
+    setError(null);
+    setMsg(null);
+    try {
+      const r = await api.updateSourceSystem(editing.name, newName, editing.description.trim() || null);
+      setMsg(
+        (newName !== editing.name ? `Renamed '${editing.name}' to '${newName}' across projects, history, examples and reference documents.` : `Updated '${newName}'.`) +
+          (r.warnings.length ? ` Some items need attention: ${r.warnings.join('; ')}` : ''),
+      );
+      setEditing(null);
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -407,7 +241,7 @@ function SourceSystemsPanel() {
       <Card>
         <CardHeader>
           <CardTitle className="text-base">Source systems</CardTitle>
-          <CardDescription>The default source system and in-use source systems cannot be deleted.</CardDescription>
+          <CardDescription>Names and descriptions can be edited, including the default&apos;s. Renaming updates every project, mapping and reference document that uses it. The default source system and in-use source systems cannot be deleted.</CardDescription>
         </CardHeader>
         <CardContent>
           {loading && <div className="space-y-2"><Skeleton className="h-8 w-full" /><Skeleton className="h-8 w-full" /></div>}
@@ -416,28 +250,76 @@ function SourceSystemsPanel() {
               <TableHeader>
                 <TableRow>
                   <TableHead>Source System</TableHead>
+                  <TableHead>Description</TableHead>
                   <TableHead />
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {sourceSystems.map((d) => {
-                  const isDefault = d.toLowerCase() === defaultSourceSystem.toLowerCase();
+                  const isEditing = editing?.name === d.name;
                   return (
-                    <TableRow key={d}>
-                      <TableCell className="text-sm font-medium">
-                        {d}
-                        {isDefault && <Tag className="ml-2 uppercase tracking-wide">Default</Tag>}
+                    <TableRow key={d.name}>
+                      <TableCell className="text-sm font-medium w-72">
+                        {isEditing ? (
+                          <Input
+                            value={editing.newName}
+                            onChange={(e) => setEditing({ ...editing, newName: e.target.value })}
+                            aria-label="Source system name"
+                            className="h-8"
+                          />
+                        ) : (
+                          <>
+                            {d.name}
+                            {d.isDefault && <Tag className="ml-2 uppercase tracking-wide">Default</Tag>}
+                          </>
+                        )}
                       </TableCell>
-                      <TableCell className="text-right">
-                        <Button
-                          variant="outline"
-                          size="icon-sm"
-                          onClick={() => void handleDelete(d)}
-                          disabled={isDefault || busy}
-                          title={isDefault ? 'The default source system cannot be deleted' : 'Delete source system'}
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </Button>
+                      <TableCell className="text-sm text-muted-foreground">
+                        {isEditing ? (
+                          <Input
+                            value={editing.description}
+                            onChange={(e) => setEditing({ ...editing, description: e.target.value })}
+                            aria-label="Description"
+                            placeholder="Short note"
+                            className="h-8"
+                          />
+                        ) : (
+                          d.description || '—'
+                        )}
+                      </TableCell>
+                      <TableCell className="text-right whitespace-nowrap">
+                        {isEditing ? (
+                          <>
+                            <Button variant="outline" size="icon-sm" className="mr-1.5" onClick={() => void handleSave()} disabled={busy} title="Save">
+                              <Check className="h-3.5 w-3.5" />
+                            </Button>
+                            <Button variant="outline" size="icon-sm" onClick={() => setEditing(null)} disabled={busy} title="Cancel">
+                              <X className="h-3.5 w-3.5" />
+                            </Button>
+                          </>
+                        ) : (
+                          <>
+                            <Button
+                              variant="outline"
+                              size="icon-sm"
+                              className="mr-1.5"
+                              onClick={() => setEditing({ name: d.name, newName: d.name, description: d.description ?? '' })}
+                              disabled={busy}
+                              title="Edit name and description"
+                            >
+                              <Pencil className="h-3.5 w-3.5" />
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="icon-sm"
+                              onClick={() => void handleDelete(d.name)}
+                              disabled={d.isDefault || busy}
+                              title={d.isDefault ? 'The default source system cannot be deleted' : 'Delete source system'}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
+                          </>
+                        )}
                       </TableCell>
                     </TableRow>
                   );
@@ -456,6 +338,7 @@ function SourceSystemsPanel() {
 // Admins curate the list; a vendor can't be deleted while a project references it.
 function VendorsPanel() {
   const [vendors, setVendors] = useState<Vendor[]>([]);
+  const [editing, setEditing] = useState<{ code: string; name: string; description: string } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
@@ -492,6 +375,24 @@ function VendorsPanel() {
       setNewName('');
       setNewCode('');
       setNewDesc('');
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleSave() {
+    if (!editing) return;
+    if (!editing.name.trim()) { setError('Enter a vendor name.'); return; }
+    setBusy(true);
+    setError(null);
+    setMsg(null);
+    try {
+      await api.updateVendor(editing.code, editing.name.trim(), editing.description.trim() || null);
+      setMsg(`Updated vendor '${editing.name.trim()}'.`);
+      setEditing(null);
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -559,7 +460,7 @@ function VendorsPanel() {
       <Card>
         <CardHeader>
           <CardTitle className="text-base">Vendors</CardTitle>
-          <CardDescription>A vendor in use by a project cannot be deleted.</CardDescription>
+          <CardDescription>Names and descriptions can be edited; the code is fixed because projects reference it. A vendor in use by a project cannot be deleted.</CardDescription>
         </CardHeader>
         <CardContent>
           {loading && <div className="space-y-2"><Skeleton className="h-8 w-full" /><Skeleton className="h-8 w-full" /></div>}
@@ -575,18 +476,52 @@ function VendorsPanel() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {vendors.map((v) => (
+                {vendors.map((v) => {
+                  const isEditing = editing?.code === v.vendor_code;
+                  return (
                   <TableRow key={v.vendor_code}>
-                    <TableCell className="text-sm font-medium">{v.name}</TableCell>
+                    <TableCell className="text-sm font-medium w-64">
+                      {isEditing ? (
+                        <Input value={editing.name} onChange={(e) => setEditing({ ...editing, name: e.target.value })} aria-label="Vendor name" className="h-8" />
+                      ) : v.name}
+                    </TableCell>
                     <TableCell className="text-sm"><Tag><Mono className="text-[0.75rem]">{v.vendor_code}</Mono></Tag></TableCell>
-                    <TableCell className="text-sm text-muted-foreground">{v.description ?? '—'}</TableCell>
-                    <TableCell className="text-right">
-                      <Button variant="outline" size="icon-sm" onClick={() => void handleDelete(v.vendor_code)} disabled={busy} title="Delete vendor">
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </Button>
+                    <TableCell className="text-sm text-muted-foreground">
+                      {isEditing ? (
+                        <Input value={editing.description} onChange={(e) => setEditing({ ...editing, description: e.target.value })} aria-label="Description" placeholder="Short note" className="h-8" />
+                      ) : (v.description || '—')}
+                    </TableCell>
+                    <TableCell className="text-right whitespace-nowrap">
+                      {isEditing ? (
+                        <>
+                          <Button variant="outline" size="icon-sm" className="mr-1.5" onClick={() => void handleSave()} disabled={busy} title="Save">
+                            <Check className="h-3.5 w-3.5" />
+                          </Button>
+                          <Button variant="outline" size="icon-sm" onClick={() => setEditing(null)} disabled={busy} title="Cancel">
+                            <X className="h-3.5 w-3.5" />
+                          </Button>
+                        </>
+                      ) : (
+                        <>
+                          <Button
+                            variant="outline"
+                            size="icon-sm"
+                            className="mr-1.5"
+                            onClick={() => setEditing({ code: v.vendor_code, name: v.name, description: v.description ?? '' })}
+                            disabled={busy}
+                            title="Edit name and description"
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                          </Button>
+                          <Button variant="outline" size="icon-sm" onClick={() => void handleDelete(v.vendor_code)} disabled={busy} title="Delete vendor">
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </Button>
+                        </>
+                      )}
                     </TableCell>
                   </TableRow>
-                ))}
+                  );
+                })}
               </TableBody>
             </Table>
           )}
@@ -649,7 +584,7 @@ function RetrievalPanel() {
 
   return (
     <div className="space-y-6">
-      <SectionIntro title="Vector index">
+      <SectionIntro title="Example search">
         Mapping generation grounds on prior work by retrieving the most similar approved examples + approved history.
         With Vector Search configured, retrieval is <strong>semantic</strong> over the whole corpus (hard-filtered by
         project + target). Otherwise it falls back to a lexical heuristic (recent + column-name overlap).
@@ -679,7 +614,7 @@ function RetrievalPanel() {
       <Card>
         <CardHeader className="flex-row items-center justify-between">
           <div>
-            <CardTitle className="text-base">Retrieval index</CardTitle>
+            <CardTitle className="text-base">Example search index</CardTitle>
             <CardDescription>Approved examples + approved history, embedded for semantic few-shot retrieval.</CardDescription>
           </div>
           <div className="flex items-center gap-3">
@@ -720,6 +655,142 @@ function RetrievalPanel() {
               </>
             )}
           </dl>
+          {msg && <p className="text-sm text-muted-foreground mt-3">{msg}</p>}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+// --- Document search (Vector Search over reference-document passages) ----------
+function ReferenceIndexPanel() {
+  const [data, setData] = useState<Awaited<ReturnType<typeof api.referenceDocs.status>> | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    setError(null);
+    try {
+      setData(await api.referenceDocs.status());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { void load(); }, [load]);
+
+  // While a re-index runs (started here, by an upload, or on the References page), poll.
+  const running = !!data?.index?.running;
+  useEffect(() => {
+    if (!running) return;
+    const t = setInterval(() => void load(), 10_000);
+    return () => clearInterval(t);
+  }, [running, load]);
+
+  async function handleReindex() {
+    setBusy(true);
+    setMsg(null);
+    setError(null);
+    try {
+      await api.referenceDocs.sync();
+      setMsg('Re-index started — new or changed documents are parsed and indexed in the background (about a minute per document).');
+      await new Promise((r) => setTimeout(r, 2000));
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const idx = data?.index ?? null;
+  const state = !idx
+    ? null
+    : idx.running
+      ? <StatusPill tone="warning">Indexing…</StatusPill>
+      : idx.lastError
+        ? <StatusPill tone="danger">Index error</StatusPill>
+        : idx.chunks > 0
+          ? <StatusPill tone="success">Indexed</StatusPill>
+          : <StatusPill tone="neutral">Not indexed</StatusPill>;
+
+  return (
+    <div className="space-y-6">
+      <SectionIntro title="Document search">
+        Reference documents (References → Reference documents) are parsed into passages and indexed with Vector Search.
+        At mapping time the most relevant passages from the project&apos;s source system ground attribute discovery and
+        SQL generation, up to the Tuning profile&apos;s reference cap.
+      </SectionIntro>
+
+      {error && (
+        <Alert variant="destructive">
+          <ShieldAlert className="h-4 w-4" />
+          <AlertTitle>Error</AlertTitle>
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
+
+      {data && !data.configured && (
+        <Alert>
+          <Info className="h-4 w-4" />
+          <AlertTitle>Reference grounding not configured</AlertTitle>
+          <AlertDescription>
+            <p>
+              Mappings aren&apos;t grounded in reference documents. To enable it, run <Code>setup/create_reference_index.sh</Code> and
+              set <Code>AIMAPPER_DOCS_INDEX</Code> in <Code>app.yaml</Code>.
+            </p>
+          </AlertDescription>
+        </Alert>
+      )}
+
+      <Card>
+        <CardHeader className="flex-row items-center justify-between">
+          <div>
+            <CardTitle className="text-base">Document search index</CardTitle>
+            <CardDescription>Passages parsed from the reference PDFs, embedded for retrieval.</CardDescription>
+          </div>
+          <div className="flex items-center gap-3">
+            {state}
+            <Button size="sm" onClick={() => void handleReindex()} disabled={busy || running || !data?.configured}>
+              <RefreshCw className={`h-4 w-4 mr-1.5 ${busy || running ? 'animate-spin' : ''}`} /> {busy || running ? 'Indexing…' : 'Re-index documents'}
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent className="border-t pt-4">
+          {loading ? (
+            <div className="space-y-2"><Skeleton className="h-6 w-full" /><Skeleton className="h-6 w-full" /></div>
+          ) : (
+            <dl className="grid grid-cols-1 sm:grid-cols-[11rem_1fr] gap-x-6 gap-y-3 text-sm items-center">
+              <dt className="text-muted-foreground">Index</dt>
+              <dd className="font-mono text-xs break-all">{idx?.name ?? '—'}</dd>
+              <dt className="text-muted-foreground">Documents volume</dt>
+              <dd className="font-mono text-xs break-all">{data?.volume ?? '—'}</dd>
+              <dt className="text-muted-foreground">Indexed documents</dt>
+              <dd>{idx?.files ?? '—'}</dd>
+              <dt className="text-muted-foreground">Indexed passages</dt>
+              <dd>{idx?.chunks ?? '—'}</dd>
+              <dt className="text-muted-foreground">Last indexed</dt>
+              <dd className="text-xs">{fmtWhen(idx?.lastIndexedAt)}</dd>
+              {idx?.finishedAt && (
+                <>
+                  <dt className="text-muted-foreground">Last re-index run</dt>
+                  <dd className="text-xs">
+                    {fmtWhen(idx.finishedAt)} · {idx.filesParsed} parsed, {idx.filesRemoved} removed
+                  </dd>
+                </>
+              )}
+              {idx?.lastError && (
+                <>
+                  <dt className="text-muted-foreground">Last error</dt>
+                  <dd className="text-xs text-destructive break-words">{idx.lastError}</dd>
+                </>
+              )}
+            </dl>
+          )}
           {msg && <p className="text-sm text-muted-foreground mt-3">{msg}</p>}
         </CardContent>
       </Card>
@@ -825,7 +896,8 @@ function PromptSizingPanel() {
               <strong>{limits.identifyMaxTokens?.toLocaleString()}</strong> · Max prompt:{' '}
               <strong>{limits.maxPromptChars?.toLocaleString()}</strong> chars · Per-example cap:{' '}
               <strong>{limits.maxExampleSqlChars?.toLocaleString()}</strong> chars · Few-shot items:{' '}
-              <strong>{limits.maxFewshotItems}</strong>
+              <strong>{limits.maxFewshotItems}</strong> · Reference grounding:{' '}
+              <strong>{limits.maxReferenceContextChars?.toLocaleString()}</strong> chars
             </p>
           )}
           {msg && <p className="text-sm text-muted-foreground mt-3">{msg}</p>}
@@ -1146,8 +1218,8 @@ function PermissionResults({ title, results, onDismiss }: { title: string; resul
           <h3 className="text-base font-bold">{title}</h3>
           <p className="mt-0.5 text-sm text-muted-foreground">
             {failed
-              ? `${failed} of ${results.length} resource permissions could not be applied with your credentials — fix the cause and use “Re-sync access” on the row.`
-              : 'Resource permissions were applied with your credentials. Only grants made here are revoked later.'}
+              ? `${failed} of ${results.length} resource permissions could not be applied with your credentials — fix the cause and click “Apply group permissions” again.`
+              : 'Resource permissions were applied to the group with your credentials. Members inherit them.'}
           </p>
         </div>
         <Button variant="ghost" size="sm" onClick={onDismiss}>Dismiss</Button>
@@ -1179,7 +1251,9 @@ function PermissionResults({ title, results, onDismiss }: { title: string; resul
 
 export function AdminPage() {
   const { role, loading: roleLoading, refresh: refreshMe, email: myEmail } = useRole();
-  const [rows, setRows] = useState<RoleAssignment[]>([]);
+  const [groups, setGroups] = useState<RoleGroup[]>([]);
+  const [members, setMembers] = useState<RoleMember[]>([]);
+  const [groupsError, setGroupsError] = useState<string | null>(null);
   const [bootstrap, setBootstrap] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1188,8 +1262,9 @@ export function AdminPage() {
   const [picked, setPicked] = useState<PickedPrincipal | null>(null);
   const [principals, setPrincipals] = useState<WorkspacePrincipals | null>(null);
   const [principalsLoading, setPrincipalsLoading] = useState(false);
-  const [permResults, setPermResults] = useState<{ title: string; results: PermissionResult[] } | null>(null);
-  const [syncingKey, setSyncingKey] = useState<string | null>(null);
+  const [permResults, setPermResults] = useState<{ title: string; results: PermissionResult[] }[] | null>(null);
+  const [provisioning, setProvisioning] = useState(false);
+  const [busyKey, setBusyKey] = useState<string | null>(null);
   const [newRole, setNewRole] = useState<Role>('editor');
   const [saving, setSaving] = useState(false);
 
@@ -1198,7 +1273,9 @@ export function AdminPage() {
     setError(null);
     try {
       const res = await api.roles();
-      setRows(res.roles);
+      setGroups(res.groups);
+      setMembers(res.members);
+      setGroupsError(res.error);
       setBootstrap(res.bootstrapAdmins);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -1228,19 +1305,27 @@ export function AdminPage() {
     return () => { cancelled = true; };
   }, [roleLoading, role]);
 
+  const missingGroups = groups.filter((g) => !g.id);
+  // The role groups themselves can't be assigned a role (no nesting role groups).
+  const pickable = useMemo(() => {
+    if (!principals) return principals;
+    const own = new Set(groups.map((g) => g.name.toLowerCase()));
+    return { ...principals, groups: principals.groups.filter((g) => !own.has(g.displayName.toLowerCase())) };
+  }, [principals, groups]);
+  const groupFor = (r: Role) => groups.find((g) => g.role === r)?.name ?? `aimapper-${r}s`;
+  const isMe = (m: RoleMember) => m.principalType === 'user' && !!myEmail && m.principal.toLowerCase() === myEmail.toLowerCase();
+
   async function handleAssign() {
     if (!picked) { setMsg('Select a user or group.'); return; }
-    const email = picked.type === 'user' ? picked.name.trim().toLowerCase() : picked.name.trim();
+    const name = picked.type === 'user' ? picked.name.trim().toLowerCase() : picked.name.trim();
     setSaving(true);
     setMsg(null);
     try {
-      const res = await api.setRole(email, newRole, picked.type);
-      setMsg(`Set ${picked.type === 'group' ? `group ${email}` : email} to ${newRole}.`);
-      if (res.permissions) setPermResults({ title: `Access for ${email} (${newRole})`, results: res.permissions });
+      const res = await api.setRole(name, newRole, picked.type);
+      setMsg(res.changes.length ? `${name}: ${res.changes.join(', ')}.` : `${name} is already in ${res.group}.`);
       setPicked(null);
       await load();
-      // The admin's own role may have changed (directly or via a group) → refresh identity/nav.
-      if (picked.type === 'group' || (myEmail && email === myEmail.toLowerCase())) refreshMe();
+      if (picked.type === 'group' || (myEmail && name === myEmail.toLowerCase())) refreshMe();
     } catch (err) {
       setMsg(err instanceof Error ? err.message : String(err));
     } finally {
@@ -1248,33 +1333,54 @@ export function AdminPage() {
     }
   }
 
-  async function handleChangeRole(email: string, r: Role, type: PrincipalType = 'user') {
+  async function handleChangeRole(m: RoleMember, r: Role) {
+    if (m.principalType === 'service_principal') return;
     setError(null);
     try {
-      setSyncingKey(`${type}:${email}`);
-      const res = await api.setRole(email, r, type);
-      if (res.permissions) setPermResults({ title: `Access for ${email} (${r})`, results: res.permissions });
+      setBusyKey(`${m.principalType}:${m.principal}`);
+      await api.setRole(m.principal, r, m.principalType);
       await load();
-      if (type === 'group' || (myEmail && email.toLowerCase() === myEmail.toLowerCase())) refreshMe();
+      if (m.principalType === 'group' || isMe(m)) refreshMe();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setSyncingKey(null);
+      setBusyKey(null);
     }
   }
 
-  async function handleRemove(email: string, type: PrincipalType = 'user') {
+  async function handleRemove(m: RoleMember) {
+    if (m.principalType === 'service_principal') return;
     setError(null);
     try {
-      setSyncingKey(`${type}:${email}`);
-      const res = await api.deleteRole(email, type);
-      if (res.permissions) setPermResults({ title: `Access removed for ${email}`, results: res.permissions });
+      setBusyKey(`${m.principalType}:${m.principal}`);
+      await api.deleteRole(m.principal, m.principalType);
       await load();
-      if (type === 'group' || (myEmail && email.toLowerCase() === myEmail.toLowerCase())) refreshMe();
+      if (m.principalType === 'group' || isMe(m)) refreshMe();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setSyncingKey(null);
+      setBusyKey(null);
+    }
+  }
+
+  async function handleProvision() {
+    setError(null);
+    setProvisioning(true);
+    try {
+      const res = await api.provisionRoleGroups();
+      setPermResults(
+        res.results.map((x) => ({
+          title: `${x.group} (${x.role})`,
+          results: x.found
+            ? x.permissions
+            : [{ resource: x.group, access: '—', status: 'failed' as const, detail: 'Group not found — run setup/08_role_groups.sh.' }],
+        })),
+      );
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setProvisioning(false);
     }
   }
 
@@ -1307,20 +1413,59 @@ export function AdminPage() {
         </TabsList>
 
         <TabsContent value="roles" className="space-y-6 mt-0">
-      <SectionIntro title="Roles & permissions">
-        Who can generate, review and administer mappings. Anyone without an explicit role is a Viewer.
+      <SectionIntro
+        title="Roles & permissions"
+        actions={
+          <Button variant="outline" onClick={() => void handleProvision()} disabled={provisioning || loading || missingGroups.length === groups.length}>
+            <KeyRound className="h-4 w-4 mr-1.5" /> {provisioning ? 'Applying…' : 'Apply group permissions'}
+          </Button>
+        }
+      >
+        Each role is a Databricks account group that holds the access the role needs. Assigning a role adds the person or group to that role&apos;s group; anyone in no role group is a Viewer.
       </SectionIntro>
 
-      {/* Role legend */}
+      {/* Role groups */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        {ROLES.map((r) => (
-          <Panel key={r} className="px-5 py-4">
-            <div className="flex items-center gap-2 mb-2">{roleBadge(r)}</div>
-            <p className="text-[0.8125rem] leading-snug text-muted-foreground">{ROLE_DESC[r]}</p>
-          </Panel>
-        ))}
+        {ROLES.slice().reverse().map((r) => {
+          const g = groups.find((x) => x.role === r);
+          return (
+            <Panel key={r} className="px-5 py-4 flex flex-col gap-2">
+              <div className="flex items-center justify-between gap-2">
+                {roleBadge(r)}
+                {loading ? null : !g?.id ? (
+                  <StatusPill tone="danger">Group missing</StatusPill>
+                ) : g.grantsApplied > 0 ? (
+                  <StatusPill tone="success">Permissions applied</StatusPill>
+                ) : (
+                  <StatusPill tone="warning">Permissions not applied</StatusPill>
+                )}
+              </div>
+              <p className="text-[0.8125rem] leading-snug text-muted-foreground">{ROLE_DESC[r]}</p>
+              <div className="mt-auto flex items-center justify-between gap-2 pt-1 text-xs text-muted-foreground">
+                <Mono className="text-xs">{groupFor(r)}</Mono>
+                <span>{loading ? '…' : `${g?.members ?? 0} member${g?.members === 1 ? '' : 's'}`}</span>
+              </div>
+            </Panel>
+          );
+        })}
       </div>
 
+      {!loading && missingGroups.length > 0 && (
+        <Alert variant="destructive">
+          <ShieldAlert className="h-4 w-4" />
+          <AlertTitle>Role groups not set up</AlertTitle>
+          <AlertDescription>
+            {missingGroups.map((g) => g.name).join(', ')} {missingGroups.length === 1 ? "doesn't" : "don't"} exist yet. Run <Code>setup/08_role_groups.sh</Code> to create the groups, then click “Apply group permissions”.
+          </AlertDescription>
+        </Alert>
+      )}
+      {groupsError && (
+        <Alert variant="destructive">
+          <ShieldAlert className="h-4 w-4" />
+          <AlertTitle>Couldn&apos;t read role groups</AlertTitle>
+          <AlertDescription>{groupsError}</AlertDescription>
+        </Alert>
+      )}
       {error && (
         <Alert variant="destructive">
           <ShieldAlert className="h-4 w-4" />
@@ -1329,17 +1474,26 @@ export function AdminPage() {
         </Alert>
       )}
 
+      {permResults?.map((p, i) => (
+        <PermissionResults
+          key={p.title}
+          title={`Permissions for ${p.title}`}
+          results={p.results}
+          onDismiss={() => setPermResults((cur) => (cur ? cur.filter((_, j) => j !== i) : cur))}
+        />
+      ))}
+
       {/* Assign a role */}
       <Card>
         <CardHeader>
           <CardTitle className="text-base">Assign a role</CardTitle>
-          <CardDescription>Grant a workspace user or group Editor or Admin. Group members inherit the group&apos;s role; anyone not covered is a Viewer by default.</CardDescription>
+          <CardDescription>Adds a workspace user or account group to the role&apos;s group (and removes them from the other role groups). Members of an added group inherit its role.</CardDescription>
         </CardHeader>
         <CardContent>
           <div className="flex items-end gap-3 flex-wrap">
             <div className="space-y-1 flex-1 min-w-64">
               <Label>User or group</Label>
-              <PrincipalPicker value={picked} onChange={setPicked} principals={principals} loading={principalsLoading} />
+              <PrincipalPicker value={picked} onChange={setPicked} principals={pickable} loading={principalsLoading} />
             </div>
             <div className="space-y-1 w-40">
               <Label>Role</Label>
@@ -1350,7 +1504,7 @@ export function AdminPage() {
                 options={ROLES.map((r) => ({ value: r, label: r }))}
               />
             </div>
-            <Button onClick={() => void handleAssign()} disabled={saving}>
+            <Button onClick={() => void handleAssign()} disabled={saving || missingGroups.length > 0}>
               <UserPlus className="h-4 w-4 mr-1.5" /> {saving ? 'Saving…' : 'Assign'}
             </Button>
           </div>
@@ -1363,10 +1517,6 @@ export function AdminPage() {
         </CardContent>
       </Card>
 
-      {permResults && (
-        <PermissionResults title={permResults.title} results={permResults.results} onDismiss={() => setPermResults(null)} />
-      )}
-
       {/* Bootstrap admins (from env) */}
       {bootstrap.length > 0 && (
         <Panel tone="sunken" className="flex items-start gap-3 px-5 py-4">
@@ -1374,77 +1524,74 @@ export function AdminPage() {
           <div className="text-sm">
             <p className="font-semibold">Bootstrap admins (environment)</p>
             <p className="mt-0.5 text-muted-foreground">
-              These emails are always admins via <Code>AIMAPPER_ADMINS</Code> and cannot be changed here:{' '}
-              <span className="font-medium text-foreground">{bootstrap.join(', ')}</span>.
+              These emails are always app admins via <Code>AIMAPPER_ADMINS</Code>, whatever their groups:{' '}
+              <span className="font-medium text-foreground">{bootstrap.join(', ')}</span>. They still need to be in a role group for resource access.
             </p>
           </div>
         </Panel>
       )}
 
-      {/* Assignments table */}
+      {/* Members */}
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Assigned roles</CardTitle>
-          <CardDescription>Users and groups with an explicit role. Assigning a role also grants the access it needs on the app&apos;s resources (app, warehouse, Genie, Knowledge Assistant, Vector Search, Unity Catalog), using your credentials. A user&apos;s effective role is the highest of their own and their groups&apos;. Removing an assignment revokes only access granted here.</CardDescription>
+          <CardTitle className="text-base">Members</CardTitle>
+          <CardDescription>Everyone in a role group, at their highest role. Changes made in Databricks account settings show up here too; role changes can take a few minutes to reach a signed-in user.</CardDescription>
         </CardHeader>
         <CardContent>
           {loading && <div className="space-y-2"><Skeleton className="h-8 w-full" /><Skeleton className="h-8 w-full" /></div>}
-          {!loading && rows.length === 0 && <p className="text-sm text-muted-foreground">No explicit assignments yet — everyone is a Viewer.</p>}
-          {!loading && rows.length > 0 && (
+          {!loading && members.length === 0 && <p className="text-sm text-muted-foreground">No one is in a role group yet — everyone is a Viewer.</p>}
+          {!loading && members.length > 0 && (
             <Table>
               <TableHeader>
                 <TableRow>
                   <TableHead>User / group</TableHead>
                   <TableHead>Role</TableHead>
-                  <TableHead>Updated by</TableHead>
-                  <TableHead>Updated</TableHead>
+                  <TableHead>Changed by</TableHead>
+                  <TableHead>Changed</TableHead>
                   <TableHead />
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {rows.map((r) => {
-                  const type: PrincipalType = r.principal_type === 'group' ? 'group' : 'user';
+                {members.map((m) => {
+                  const key = `${m.principalType}:${m.principal}`;
+                  const sp = m.principalType === 'service_principal';
                   return (
-                  <TableRow key={`${type}:${r.user_email}`}>
+                  <TableRow key={key}>
                     <TableCell className="text-sm font-medium">
                       <span className="inline-flex items-center gap-3">
-                        {type === 'group' ? (
-                          <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground"><Users className="h-3.5 w-3.5" /></span>
+                        {m.principalType === 'user' ? (
+                          <Avatar name={m.principal} size="sm" />
                         ) : (
-                          <Avatar name={r.user_email} size="sm" />
+                          <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground"><Users className="h-3.5 w-3.5" /></span>
                         )}
-                        {r.user_email}
-                        {type === 'group' && <Tag>Group</Tag>}
+                        {m.principal}
+                        {m.principalType === 'group' && <Tag>Group</Tag>}
+                        {sp && <Tag>Service principal</Tag>}
                       </span>
-                      {type === 'user' && myEmail && r.user_email.toLowerCase() === myEmail.toLowerCase() && (
-                        <span className="text-xs text-muted-foreground ml-2">(you)</span>
+                      {isMe(m) && <span className="text-xs text-muted-foreground ml-2">(you)</span>}
+                      {m.alsoIn.length > 0 && (
+                        <span className="block text-xs text-muted-foreground mt-0.5 ml-10">Also in {m.alsoIn.map(groupFor).join(', ')}</span>
                       )}
                     </TableCell>
                     <TableCell className="w-36">
-                      <SearchableSelect
-                        value={String(r.role).toLowerCase()}
-                        onValueChange={(v) => void handleChangeRole(r.user_email, v as Role, type)}
-                        className="w-full h-8"
-                        options={ROLES.map((x) => ({ value: x, label: x }))}
-                      />
+                      {sp ? roleBadge(m.role) : (
+                        <SearchableSelect
+                          value={m.role}
+                          onValueChange={(v) => void handleChangeRole(m, v as Role)}
+                          className="w-full h-8"
+                          disabled={busyKey === key}
+                          options={ROLES.map((x) => ({ value: x, label: x }))}
+                        />
+                      )}
                     </TableCell>
-                    <TableCell className="text-xs text-muted-foreground">{r.updated_by ?? '—'}</TableCell>
-                    <TableCell className="text-xs text-muted-foreground">{r.updated_at ? String(r.updated_at).slice(0, 16) : '—'}</TableCell>
+                    <TableCell className="text-xs text-muted-foreground">{m.updatedBy ?? '—'}</TableCell>
+                    <TableCell className="text-xs text-muted-foreground">{m.updatedAt ? String(m.updatedAt).slice(0, 16) : '—'}</TableCell>
                     <TableCell className="text-right">
-                      <Button
-                        variant="outline"
-                        size="icon-sm"
-                        className="mr-1.5"
-                        disabled={syncingKey === `${type}:${r.user_email}`}
-                        onClick={() => void handleChangeRole(r.user_email, String(r.role).toLowerCase() as Role, type)}
-                        title="Re-sync access: re-apply this role's resource permissions"
-                      >
-                        <KeyRound className="h-3.5 w-3.5" />
-                        <span className="sr-only">Re-sync access</span>
-                      </Button>
-                      <Button variant="outline" size="icon-sm" onClick={() => void handleRemove(r.user_email, type)} title="Remove assignment (revert to Viewer)">
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </Button>
+                      {!sp && (
+                        <Button variant="outline" size="icon-sm" disabled={busyKey === key} onClick={() => void handleRemove(m)} title="Remove from role groups (revert to Viewer)">
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </Button>
+                      )}
                     </TableCell>
                   </TableRow>
                   );
@@ -1460,19 +1607,16 @@ export function AdminPage() {
           <ConfigPanel />
         </TabsContent>
 
-        <TabsContent value="ka" className="mt-0 space-y-6">
-          <SectionIntro title="Knowledge Assistant">
-            Reference documents that ground attribute discovery and SQL generation.
-          </SectionIntro>
-          <KnowledgeAssistantPanel />
-        </TabsContent>
-
         <TabsContent value="sourceSystems" className="mt-0">
           <SourceSystemsPanel />
         </TabsContent>
 
         <TabsContent value="vendors" className="mt-0">
           <VendorsPanel />
+        </TabsContent>
+
+        <TabsContent value="referenceIndex" className="mt-0">
+          <ReferenceIndexPanel />
         </TabsContent>
 
         <TabsContent value="retrieval" className="mt-0">

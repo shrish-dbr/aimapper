@@ -6,7 +6,7 @@ install** that runs **alongside** an existing older (`automapper`) deployment wi
 touching it.
 
 The old app keeps running for reference; the new app gets its own schema, tables, and
-(optional) Vector Search index + Knowledge Assistant.
+(optional) Vector Search indexes for retrieval and reference-document grounding.
 
 Placeholders used below:
 
@@ -129,10 +129,8 @@ Open `/Workspace/Users/<you>/aimapper/app.yaml` and set:
     value: aimapper
   - name: AIMAPPER_ADMINS
     value: "<customer-admin-email>"   # comma-separated; always-admin bootstrap
-  # KA (optional) — fill from Part 10, or leave blank to disable PDF grounding:
-  - name: AIMAPPER_KA_ENDPOINT
-    value: ""
-  - name: AIMAPPER_KA_ID
+  # Reference-PDF grounding (optional) — fill from Part 10, or leave blank to disable:
+  - name: AIMAPPER_DOCS_INDEX
     value: ""
   # Vector Search (optional) — fill from Part 9, or leave blank for lexical retrieval:
   - name: AIMAPPER_VS_ENDPOINT
@@ -177,15 +175,14 @@ Put the printed `AIMAPPER_VS_ENDPOINT` / `AIMAPPER_VS_INDEX` into `app.yaml`
 
 ---
 
-## Part 10 — (Optional) Knowledge Assistant
+## Part 10 — (Optional) Reference-document grounding
 
 ```bash
-CATALOG=<CAT> SCHEMA=aimapper APP_NAME=aimapper bash setup/create_ka.sh
+CATALOG=<CAT> SCHEMA=aimapper ENDPOINT=aimapper-retrieval bash setup/create_reference_index.sh
 ```
 
-Creates a **new** KA over `<CAT>.aimapper`'s `reference_docs` volume and grants the new
-app's SP `CAN_MANAGE` (old KA untouched). Put the printed `AIMAPPER_KA_ID` /
-`AIMAPPER_KA_ENDPOINT` into `app.yaml`, then **re-run Part 8**.
+Put the printed `AIMAPPER_DOCS_INDEX` into `app.yaml` (Part 7), **re-run Part 8**, then
+click **Re-index documents** on the References page.
 
 ---
 
@@ -199,7 +196,8 @@ app's SP `CAN_MANAGE` (old KA untouched). Put the printed `AIMAPPER_KA_ID` /
      `mapping_examples`, `aimapper_config`
    - `SELECT` (+ `USE`) on the **source** data they'll map
    - `CAN USE` on the SQL warehouse, `CAN QUERY` on the serving endpoint
-   - (if KA enabled) `READ VOLUME`/`WRITE VOLUME` on `reference_docs`, `CAN QUERY` on the KA endpoint
+   - `READ VOLUME`/`WRITE VOLUME` on `reference_docs`, `CAN USE` on the Vector Search endpoint
+   - Simpler: run `setup/08_role_groups.py`, then **Admin → Roles → Apply group permissions**, and add users to the role groups (README step 7).
 3. Final: app `RUNNING`, a test mapping generates, and the old `automapper` app still runs.
 
 ---

@@ -38,8 +38,6 @@ export interface ResourceIds {
   appName: string | null;
   warehouseId: string | null;
   genieSpaceId: string | null;
-  kaEndpointId: string | null;
-  kaId: string | null;
   vsEndpointId: string | null;
 }
 
@@ -50,7 +48,6 @@ export const LEVELS: Record<string, string[]> = {
   'serving-endpoints': ['CAN_VIEW', 'CAN_QUERY', 'CAN_MANAGE'],
   warehouses: ['CAN_VIEW', 'CAN_MONITOR', 'CAN_USE', 'CAN_MANAGE', 'IS_OWNER'],
   'vector-search-endpoints': ['CAN_USE', 'CAN_MANAGE'],
-  'knowledge-assistants': ['CAN_QUERY', 'CAN_MANAGE'],
 };
 
 /** True when `have` is at least `want` for this object type (unknown levels → false). */
@@ -70,6 +67,8 @@ const EDITOR_WRITE_TABLES = [
   'aimapper_retrieval_corpus',
   'aimapper_projects',
   'aimapper_domain_instructions',
+  // Uploading/deleting/re-syncing reference documents re-indexes their chunks.
+  'aimapper_reference_chunks',
 ];
 const REFERENCE_VOLUME = 'reference_docs';
 
@@ -84,9 +83,7 @@ export function planGrants(role: AppRole, ids: ResourceIds): PlannedGrant[] {
   acl('apps', ids.appName, admin ? 'CAN_MANAGE' : 'CAN_USE', 'AI Mapper app');
   acl('warehouses', ids.warehouseId, admin ? 'CAN_MANAGE' : 'CAN_USE', 'SQL warehouse');
   acl('genie', ids.genieSpaceId, admin ? 'CAN_MANAGE' : 'CAN_RUN', 'Genie space');
-  acl('serving-endpoints', ids.kaEndpointId, admin ? 'CAN_MANAGE' : 'CAN_QUERY', 'Knowledge Assistant endpoint');
   acl('vector-search-endpoints', ids.vsEndpointId, admin ? 'CAN_MANAGE' : 'CAN_USE', 'Vector Search endpoint');
-  if (admin) acl('knowledge-assistants', ids.kaId, 'CAN_MANAGE', 'Knowledge Assistant');
 
   const schemaFq = `${ids.catalog}.${ids.schema}`;
   const uc = (securable: UcGrant['securable'], name: string, privilege: string, label: string) =>

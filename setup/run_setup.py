@@ -29,7 +29,7 @@ from databricks.sdk.service.sql import StatementState
 
 SQL_FILES = ["01_create_tables.sql", "02_seed_target_schema.sql",
              "03_sample_source.sql", "04_examples.sql",
-             "05_reference_docs.sql", "06_retrieval_corpus.sql"]
+             "05_reference_docs.sql", "06_retrieval_corpus.sql", "07_reference_chunks.sql"]
 
 
 def substitute(sql: str, catalog: str, schema: str) -> str:

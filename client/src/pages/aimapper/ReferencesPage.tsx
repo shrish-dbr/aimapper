@@ -21,7 +21,7 @@ import {
 } from 'lucide-react';
 import { api, type MappingExample, type ReferenceDoc, type ReferenceDocsStatus } from '../../lib/aimapperApi';
 import { useRole } from '../../lib/roleContext';
-import { PageHeader, Panel, PanelHeader, StatusPill, Chip, Mono, SearchField, EmptyState } from '../../components/studio';
+import { PageHeader, Panel, PanelHeader, StatusPill, Chip, Mono, SearchField, EmptyState, Tag } from '../../components/studio';
 import { cn } from '../../lib/utils';
 
 function isApproved(v: MappingExample['approved']): boolean {
@@ -76,6 +76,14 @@ function SqlBlock({ sql }: { sql: string }) {
       {highlightSql(sql)}
     </pre>
   );
+}
+
+/** Vector Search index state of the reference documents. */
+function docsIndexState(st: ReferenceDocsStatus | null, syncing = false): { label: string; tone: 'success' | 'warning' | 'danger' | 'neutral' } | null {
+  if (!st?.configured || !st.index) return null;
+  if (syncing || st.index.running) return { label: 'Indexing…', tone: 'warning' };
+  if (st.index.lastError) return { label: 'Index error', tone: 'danger' };
+  return st.index.chunks > 0 ? { label: 'Indexed', tone: 'success' } : { label: 'Not indexed', tone: 'neutral' };
 }
 
 /** Underlined text action (Edit / Download / Delete) — keyboard accessible. */
@@ -291,10 +299,8 @@ function MappingExamplesTab({ actionSlot, onCount }: { actionSlot: HTMLElement |
     </Button>
   ) : null;
 
-  const cachedDocs = docsCache;
-  const cachedDocsStatus = docsStatusCache;
   const cachedInstructions = instructionsCache;
-  const hasRail = !!retrieval?.configured || !!cachedDocs || !!cachedInstructions;
+  const hasRail = !!retrieval?.configured || !!cachedInstructions;
 
   return (
     <>
@@ -425,7 +431,7 @@ function MappingExamplesTab({ actionSlot, onCount }: { actionSlot: HTMLElement |
           {retrieval?.configured && (
             <Panel tone="ink" className="p-5 space-y-4">
               <div className="flex items-center justify-between gap-3">
-                <h3 className="text-[1.0625rem] font-bold text-white">Retrieval index</h3>
+                <h3 className="text-[1.0625rem] font-bold text-white">Example search</h3>
                 {retrieval.indexReady === false ? (
                   <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-warning"><span className="h-1.5 w-1.5 rounded-full bg-current" />Re-embedding…</span>
                 ) : retrieval.indexReady ? (
@@ -449,34 +455,6 @@ function MappingExamplesTab({ actionSlot, onCount }: { actionSlot: HTMLElement |
                   <RefreshCw className={`h-3.5 w-3.5 ${resyncing ? 'animate-spin' : ''}`} />
                   {resyncing ? 'Re-syncing…' : 'Re-sync index'}
                 </button>
-              )}
-            </Panel>
-          )}
-
-          {cachedDocs && (
-            <Panel className="p-5 space-y-3">
-              <div className="flex items-center justify-between gap-3">
-                <h3 className="text-[1.0625rem] font-bold">Reference documents</h3>
-                {cachedDocsStatus?.configured && (
-                  cachedDocsStatus.syncState === 'UPDATING' ? <StatusPill tone="warning" dot={false}>Syncing</StatusPill>
-                    : cachedDocsStatus.syncState === 'UPDATED' ? <StatusPill tone="success" dot={false}>Synced</StatusPill>
-                      : <StatusPill tone="neutral" dot={false}>Unknown</StatusPill>
-                )}
-              </div>
-              {cachedDocs.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No reference documents yet.</p>
-              ) : (
-                <ul className="space-y-1.5">
-                  {cachedDocs.map((d) => (
-                    <li key={d.path} className="flex items-center justify-between gap-3 text-sm">
-                      <span className="truncate" title={d.name}>{d.name}</span>
-                      {d.size != null && <span className="shrink-0 text-xs text-muted-foreground">{formatFileSize(d.size)}</span>}
-                    </li>
-                  ))}
-                </ul>
-              )}
-              {cachedDocsStatus?.configured && (
-                <p className="text-xs text-muted-foreground">Last synced {fmtWhen(cachedDocsStatus.lastSyncedAt)}</p>
               )}
             </Panel>
           )}
@@ -568,7 +546,11 @@ function ReferenceDocsTab({ onCount }: { onCount: (n: number) => void }) {
       for (const file of Array.from(files)) {
         await api.referenceDocs.upload(file, domain);
       }
-      setMsg(`Uploaded ${files.length} file(s) to ${domain}. Re-sync the knowledge base to index them.`);
+      setMsg(
+        status?.index
+          ? `Uploaded ${files.length} file(s) to ${domain}. They're being parsed and indexed in the background (about a minute per document).`
+          : `Uploaded ${files.length} file(s) to ${domain}. They'll be indexed once reference grounding is configured.`,
+      );
       await load(domain);
     } catch (err) {
       showError(err);
@@ -609,18 +591,18 @@ function ReferenceDocsTab({ onCount }: { onCount: (n: number) => void }) {
     setNeedsReauth(false);
     try {
       await api.referenceDocs.sync();
-      setMsg('Re-sync started — indexing usually takes 2–5 minutes. You can keep working; this refreshes automatically.');
-      // Poll the sync state until it returns to UPDATED (keep the icon spinning).
+      setMsg('Re-index started — new or changed documents are parsed and indexed (usually 1–5 minutes). You can keep working; this refreshes automatically.');
+      // Poll until the background re-index finishes (keep the icon spinning).
       // Give up after ~10 min so the spinner never hangs forever.
       const deadline = Date.now() + 10 * 60 * 1000;
-      // Small initial delay so the source flips to UPDATING before we first poll.
+      // Small initial delay before the first poll.
       await new Promise((r) => setTimeout(r, 4000));
       while (Date.now() < deadline) {
         let st: ReferenceDocsStatus | null = null;
         try { st = await api.referenceDocs.status(); } catch { /* transient */ }
         if (st) { docsStatusCache = st; setStatus(st); }
-        if (st && st.syncState && st.syncState !== 'UPDATING') {
-          setMsg('Re-sync complete — reference documents are indexed.');
+        if (st && (!st.index || !st.index.running)) {
+          setMsg(st.index?.lastError ? `Re-index finished with an error: ${st.index.lastError}` : 'Re-index complete — reference documents are indexed.');
           break;
         }
         await new Promise((r) => setTimeout(r, 15000));
@@ -636,7 +618,7 @@ function ReferenceDocsTab({ onCount }: { onCount: (n: number) => void }) {
   useEffect(() => { if (!loading) onCount(docs.length); }, [docs.length, loading, onCount]);
 
   // Not configured: explain how to enable it, but still allow uploading files to
-  // the volume (they'll be indexed once an admin wires up the assistant).
+  // the volume (they'll be indexed once an admin configures the reference index).
   const notConfigured = status != null && !status.configured;
 
   return (
@@ -644,8 +626,9 @@ function ReferenceDocsTab({ onCount }: { onCount: (n: number) => void }) {
       <div className="space-y-4 min-w-0">
         <p className="text-sm text-muted-foreground">
           Upload reference documents (data dictionaries, field definitions, mapping runbooks) that describe your source
-          metadata. They are indexed by a Knowledge Assistant and used to <strong className="text-foreground">ground</strong> attribute discovery and
-          SQL generation — the assistant&apos;s guidance is injected into the prompts alongside the mapping examples.
+          metadata. They are split into passages and indexed with Vector Search; the most relevant passages{' '}
+          <strong className="text-foreground">ground</strong> attribute discovery and SQL generation — they are injected
+          into the prompts, with file and page citations, alongside the mapping examples.
         </p>
 
         <div className="flex items-end gap-4 flex-wrap">
@@ -661,16 +644,15 @@ function ReferenceDocsTab({ onCount }: { onCount: (n: number) => void }) {
             />
           </div>
           <p className="text-xs text-muted-foreground pb-2 flex-1 min-w-64">
-            Documents are organized per source system. Grounding is steered toward the selected source system&apos;s docs, though the
-            assistant searches one shared index, so isolation is best-effort.
+            Documents are organized per source system. Mappings are grounded only in passages from their project&apos;s source-system documents.
           </p>
         </div>
 
         {notConfigured && (
           <div className="rounded-xl bg-warning-soft px-4 py-3 text-sm text-warning-soft-foreground">
-            No Knowledge Assistant is configured yet, so uploaded documents are not used to ground mappings. An admin can
-            enable it by running <code className="font-mono">setup/create_ka.sh</code> and setting{' '}
-            <code className="font-mono">AIMAPPER_KA_ENDPOINT</code>. You can still upload files to the volume below.
+            Reference grounding isn&apos;t configured yet, so uploaded documents are not used to ground mappings. An admin can
+            enable it by running <code className="font-mono">setup/create_reference_index.sh</code> and setting{' '}
+            <code className="font-mono">AIMAPPER_DOCS_INDEX</code>. You can still upload files to the volume below.
           </div>
         )}
 
@@ -690,7 +672,7 @@ function ReferenceDocsTab({ onCount }: { onCount: (n: number) => void }) {
         <Panel className="overflow-hidden">
           <PanelHeader
             title="Reference documents"
-            description={loading ? 'Loading…' : `${docs.length} document(s) in the knowledge base.`}
+            description={loading ? 'Loading…' : `${docs.length} document(s) in the reference library.`}
           />
           <div className="border-t border-border">
             {loading && <div className="p-5"><Skeleton className="h-16 w-full" /></div>}
@@ -707,6 +689,11 @@ function ReferenceDocsTab({ onCount }: { onCount: (n: number) => void }) {
                   </span>
                   <span className="text-sm font-medium text-foreground truncate" title={d.name}>{d.name}</span>
                   {d.size != null && <span className="text-xs text-muted-foreground shrink-0">{formatFileSize(d.size)}</span>}
+                  {d.chunks != null && (
+                    <span title="Passages indexed for grounding" className="shrink-0">
+                      {d.chunks > 0 ? <Tag>{d.chunks} chunks</Tag> : <StatusPill tone="warning" dot={false}>Not indexed</StatusPill>}
+                    </span>
+                  )}
                   <span className="ml-auto flex items-center gap-4 pl-2 shrink-0">
                     <TextAction onActivate={() => void handleDownload(d.name)}>Download</TextAction>
                     {isEditor && <TextAction tone="danger" onActivate={() => void handleDelete(d.name)}>Delete</TextAction>}
@@ -718,34 +705,33 @@ function ReferenceDocsTab({ onCount }: { onCount: (n: number) => void }) {
         </Panel>
       </div>
 
-      {/* ── Right rail: knowledge base status + upload ───────────────────── */}
+      {/* ── Right rail: reference index status + upload ───────────────────── */}
       <aside className="space-y-4 min-w-0">
         <Panel tone="ink" className="p-5 space-y-4">
           <div className="flex items-center justify-between gap-3">
-            <h3 className="text-[1.0625rem] font-bold text-white">Knowledge base</h3>
-            {status?.configured && (
-              syncing || status.syncState === 'UPDATING' ? (
-                <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-warning"><span className="h-1.5 w-1.5 rounded-full bg-current" />Syncing…</span>
-              ) : status.syncState === 'UPDATED' ? (
-                <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#5fd39d]"><span className="h-1.5 w-1.5 rounded-full bg-current" />Synced</span>
-              ) : (
-                <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-ink-muted"><span className="h-1.5 w-1.5 rounded-full bg-current" />Unknown</span>
-              )
-            )}
+            <h3 className="text-[1.0625rem] font-bold text-white">Document search</h3>
+            {(() => {
+              const st = docsIndexState(status, syncing);
+              if (!st) return null;
+              const color = st.tone === 'success' ? 'text-[#5fd39d]' : st.tone === 'warning' ? 'text-warning' : st.tone === 'danger' ? 'text-[#ff9b8b]' : 'text-ink-muted';
+              return <span className={`inline-flex items-center gap-1.5 text-xs font-semibold ${color}`}><span className="h-1.5 w-1.5 rounded-full bg-current" />{st.label}</span>;
+            })()}
           </div>
           <p className="text-sm text-ink-foreground/85">
-            Documents are indexed by a Knowledge Assistant that grounds attribute discovery and SQL generation.
+            Documents are parsed into passages and indexed with Vector Search. The most relevant passages ground attribute discovery and SQL generation.
           </p>
           <RailRow ink label="Documents" value={loading ? '…' : docs.length} />
-          {status?.configured && <RailRow ink label="Last synced" value={fmtWhen(status.lastSyncedAt)} />}
-          {isEditor && status?.canSync && (
+          {status?.index && <RailRow ink label="Indexed passages" value={status.index.chunks} />}
+          {status?.index && <RailRow ink label="Last indexed" value={fmtWhen(status.index.lastIndexedAt)} />}
+          {status?.index?.lastError && <p className="text-xs text-[#ff9b8b] break-words">{status.index.lastError}</p>}
+          {isEditor && status?.configured && (
             <button
               type="button"
               onClick={() => void handleSync()}
               disabled={syncing}
               className="flex w-full items-center justify-center gap-2 rounded-[0.625rem] border border-white/20 bg-transparent px-4 py-2.5 text-sm font-semibold text-white hover:bg-white/10 disabled:opacity-50 disabled:pointer-events-none"
             >
-              <RefreshCw className={`h-3.5 w-3.5 ${syncing ? 'animate-spin' : ''}`} /> {syncing ? 'Syncing…' : 'Re-sync Knowledge Base'}
+              <RefreshCw className={`h-3.5 w-3.5 ${syncing ? 'animate-spin' : ''}`} /> {syncing ? 'Indexing…' : 'Re-index documents'}
             </button>
           )}
         </Panel>
@@ -753,7 +739,9 @@ function ReferenceDocsTab({ onCount }: { onCount: (n: number) => void }) {
         {isEditor && (
           <Panel className="p-5 space-y-3">
             <h3 className="text-[1.0625rem] font-bold">Upload reference documents</h3>
-            <p className="text-sm text-muted-foreground">PDF, DOCX, TXT, or MD. Files &gt;100 MB or &gt;500 pages are skipped by the assistant.</p>
+            <p className="text-sm text-muted-foreground">
+              PDF, DOCX, PPTX or images. Each upload is parsed and indexed automatically (up to 500 pages / 100 MB per file).
+            </p>
             <input
               ref={fileInput}
               type="file"

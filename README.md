@@ -76,7 +76,7 @@ It runs (also runnable by hand in the SQL editor — replace `your_catalog` firs
 | `setup/02_seed_target_schema.sql` | a sample healthcare target model (optional; replace with the customer's real target schema) |
 | `setup/03_sample_source.sql` | normalized sample source tables that demonstrate multi-table JOINs (optional; demo data) |
 | `setup/04_examples.sql` | the `mapping_examples` references store |
-| `setup/05_reference_docs.sql` | the `reference_docs` UC volume for Knowledge Assistant PDFs |
+| `setup/05_reference_docs.sql` | the `reference_docs` UC volume for reference PDFs |
 | `setup/06_retrieval_corpus.sql` | the `aimapper_retrieval_corpus` table (Vector Search source; approved examples + history) |
 
 The `aimapper_config` table (stores the in-app selected target-schema table) is created
@@ -84,35 +84,31 @@ automatically on first save from the Config page.
 
 ---
 
-## 3b. (Optional) Set up the Knowledge Assistant
+## 3a. (Optional, recommended) Reference-document grounding with Vector Search
 
-The **References → Reference documents** tab lets users upload source-metadata
-PDFs (data dictionaries, field definitions, ERDs) that are used to *ground* the
-LLM's mapping. This is powered by a managed **Agent Bricks Knowledge Assistant**
-pointed at the `reference_docs` volume created above. It is fully optional — with
-no KA configured the app works exactly as before, just without doc grounding.
+The **References → Reference documents** tab lets users upload source-metadata PDFs
+(data dictionaries, field definitions, ERDs) that *ground* the LLM's mapping, using
+**Vector Search over parsed passages**. Without it the app works the same, just without
+doc grounding:
+
+1. Upload / delete / **Re-index documents** → the app parses each changed file with
+   `ai_parse_document`, splits it into ~1.5k-char passages (section-aware; tables
+   flattened to `a | b` rows, long tables split by rows with the header repeated) and
+   writes them to `aimapper_reference_chunks` (`server/aimapper/references.ts`).
+2. A Delta Sync index embeds the passages (`databricks-gte-large-en`).
+3. Each mapping queries the index once per group of ~15 target columns, **filtered to the
+   project's source system** (the volume folder, e.g. `Epic/`), and packs **whole**
+   passages best-first into the Prompt Sizing reference cap — 10k / 20k / 30k chars for
+   Conservative / Balanced / Generous. The Mapper shows which files/pages grounded it.
 
 ```bash
-CATALOG=<your_catalog> SCHEMA=aimapper PROFILE=customer bash setup/create_ka.sh
+# table (also created by run_setup.py), then the index on the retrieval endpoint (3c)
+CATALOG=<your_catalog> SCHEMA=aimapper PROFILE=customer bash setup/create_reference_index.sh
 ```
 
-The script prints an **`AIMAPPER_KA_ID`** and **`AIMAPPER_KA_ENDPOINT`** —
-set both in `app.yaml` (step 4). Users then upload/delete PDFs and trigger a
-re-sync from the References page.
-
-> The app manages the KA (re-sync, status) **as its service principal**, because the
-> knowledge-assistants API needs the broad `all-apis` scope a user token can't carry.
-> The script grants the app SP `CAN_MANAGE` on the KA automatically (it resolves the SP
-> from `APP_NAME`, default `aimapper`; or pass `APP_SP=<client_id>`). If that grant is
-> skipped, in-app re-sync fails with `PERMISSION_DENIED` — grant it manually with
-> `databricks knowledge-assistants update-permissions <ka_id> --json '{"access_control_list":[{"service_principal_name":"<app_sp_client_id>","permission_level":"CAN_MANAGE"}]}'`.
-
-**KA limits:** ≤10 knowledge sources per KA (all PDFs share one volume source, so
-this is not a per-file cap), files >100 MB skipped, PDF/DOCX/PPTX >500 pages
-skipped, files starting with `_`/`.` skipped. Formats: PDF, TXT, MD, DOCX, PPT/PPTX.
-The KA takes 2–5 min to come online, and each re-sync runs a few minutes.
-
----
+Set the printed **`AIMAPPER_DOCS_INDEX`** in `app.yaml`, deploy, then click
+**Re-index documents** once (References page) to parse documents already in the volume.
+The `aimapper-editors` group gets `MODIFY` on the chunks table (step 7).
 
 ## 3c. (Optional) Set up semantic retrieval (Vector Search)
 
@@ -174,18 +170,7 @@ not support `${var}` substitution, so edit it directly):
 
 ## 5. Deploy
 
-**Recommended: `bash setup/deploy.sh [profile]`.** It runs the app deploy AND
-re-grants the app service principal `CAN_MANAGE` on the Knowledge Assistant — a grant
-the in-app "Re-sync Knowledge Base" button needs and that is NOT a DABs-managed
-resource (so it can't live in `databricks.yml`). The SP is recreated whenever the app
-is recreated, so tying the grant to deploy keeps re-sync working. Override defaults
-via env (`APP_NAME`, `KA_ID`, `WAREHOUSE_ID`, `SERVING_ENDPOINT`).
-
-```bash
-bash setup/deploy.sh demojune2026
-```
-
-Under the hood it runs `databricks apps deploy`, which builds the app **on the
+`databricks apps deploy` builds the app **on the
 workspace** (installs deps + builds the React client server-side) and starts it:
 
 ```bash
@@ -193,9 +178,7 @@ databricks apps deploy -p customer \
   --var="sql_warehouse_id=<id>,serving_endpoint_name=databricks-claude-sonnet-4-5"
 ```
 
-If you deploy with the bare command instead of `setup/deploy.sh`, remember to grant
-the app SP `CAN_MANAGE` on the KA yourself (see `setup/create_ka.sh`), or in-app
-re-sync will 403. If you created `variable-overrides.json`, a bare
+If you created `variable-overrides.json`, a bare
 `databricks apps deploy -p customer` works. Deploy takes ~1–3 min. Verify:
 
 ```bash
@@ -215,18 +198,60 @@ If the customer network blocks local CLI access, deploy from the workspace:
 
 ---
 
-## 7. Grant users access (OBO)
+## 7. Grant users access — role groups
 
-The app runs OBO, so **each end user** needs, in the customer workspace:
+Each app role is a Databricks **account group** that holds every permission the role
+needs. Admins give someone a role by adding them to the group (in **Admin → Roles**);
+nobody gets per-user grants.
 
-- `USE CATALOG` + `USE SCHEMA` on the catalog/schema holding the app's tables,
-- `SELECT` + `MODIFY` on `target_schema`, `aimapper_conversion_runs`,
-  `mapping_examples`, `aimapper_config`,
-- `USE CATALOG`/`USE SCHEMA` + `SELECT` on the **source** data they want to map,
-- `CAN USE` on the SQL Warehouse,
-- `CAN QUERY` on the serving endpoint,
-- (if the Knowledge Assistant is enabled) `READ VOLUME`/`WRITE VOLUME` on the
-  `reference_docs` volume and `CAN QUERY` on the KA endpoint.
+| Role | Group | Can |
+|---|---|---|
+| Admin | `aimapper-admins` | everything, incl. config, deletes, role management |
+| Editor | `aimapper-editors` | viewer + approve/reject reviews, curate references |
+| Viewer | `aimapper-viewers` | generate SQL, submit mappings for review |
+
+**One-time setup** (a workspace admin, after the first deploy):
+
+```bash
+python3 setup/08_role_groups.py --profile customer --app aimapper --first-admin you@example.com
+```
+
+This creates the three account groups (if missing), assigns them to the workspace,
+makes the app's service principal a **Group manager** of each, and grants the groups
+access to the **app** and the **Genie space** (admins `CAN MANAGE`; editors/viewers
+`CAN USE` / `CAN RUN`). Those two can't be set from inside the app because app
+sign-in tokens can't carry the `access-management` scope, so re-run the script if the
+app or Genie space changes. That's needed because
+user sign-in tokens can't carry the `scim` scope, so the app changes membership as its
+service principal, after checking the caller is an app admin.
+
+Then open the app → **Admin → Roles → Apply group permissions**. With your identity it
+grants each group:
+
+- **all roles:** `CAN USE` on the app and SQL warehouse, `CAN RUN` on the Genie space,
+  `CAN USE` on the Vector Search
+  endpoint, `USE CATALOG`, and on the schema `USE SCHEMA` + `SELECT` + `READ VOLUME`;
+- **viewers:** `MODIFY` on the run/step/feedback/prefs tables;
+- **editors:** additionally `MODIFY` on examples, retrieval corpus, projects, domain
+  instructions and reference chunks, and `WRITE VOLUME` on `reference_docs`;
+- **admins:** `CAN MANAGE` on every resource, `ALL PRIVILEGES` + `MANAGE` on the schema.
+
+Re-run **Apply group permissions** whenever the app's resources change (e.g. a new
+Genie space or Vector Search endpoint). Grants are recorded in `aimapper_permission_grants`.
+
+Notes:
+
+- A user's role is the highest role group they're in, **directly or through a nested
+  group**, so you can add an existing account group (e.g. a team) to a role group.
+  Workspace-local groups can't be members of account groups.
+- People in no role group are treated as Viewers in the app, but without the groups'
+  grants they can't open it unless they have access some other way.
+- `AIMAPPER_ADMINS` (bootstrap admins) are always app admins; add them to
+  `aimapper-admins` too so they get the resource access.
+- Group names can be changed with `AIMAPPER_ADMIN_GROUP` / `AIMAPPER_EDITOR_GROUP` /
+  `AIMAPPER_VIEWER_GROUP` (use the same names with the setup script's `--*-group` flags).
+- **Source data** isn't covered: grant `USE CATALOG`/`USE SCHEMA` + `SELECT` on the
+  source tables users map, e.g. to `aimapper-viewers`.
 
 The app's service principal gets `CAN_USE` on the warehouse and `CAN_QUERY` on the
 endpoint automatically at deploy time (declared in `databricks.yml`).
@@ -248,10 +273,11 @@ endpoint automatically at deploy time (declared in `databricks.yml`).
 |---|---|---|
 | `AIMAPPER_CATALOG` | `your_catalog` | UC catalog holding the app's tables |
 | `AIMAPPER_SCHEMA` | `aimapper` | Schema within the catalog |
-| `AIMAPPER_KA_ENDPOINT` | *(empty)* | Knowledge Assistant query endpoint (optional; enables doc grounding) |
-| `AIMAPPER_KA_ID` | *(empty)* | Knowledge Assistant id, for the in-app re-sync button (optional) |
+| `AIMAPPER_DOCS_INDEX` | *(empty)* | Vector Search index over reference-PDF passages (optional; enables doc grounding) |
 | `AIMAPPER_VS_ENDPOINT` | *(empty)* | Vector Search endpoint for semantic retrieval (optional) |
 | `AIMAPPER_VS_INDEX` | *(empty)* | Vector Search index over the retrieval corpus (optional; empty ⇒ lexical retrieval) |
+| `AIMAPPER_ADMINS` | *(empty)* | Bootstrap admin emails (always app admins) |
+| `AIMAPPER_ADMIN_GROUP` / `_EDITOR_GROUP` / `_VIEWER_GROUP` | `aimapper-admins` / `-editors` / `-viewers` | Account groups that define the roles (step 7) |
 
 Injected automatically at runtime: `DATABRICKS_HOST` and the OBO user token.
 

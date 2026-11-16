@@ -53,6 +53,23 @@ import {
   type PlannedGrant,
   type PrincipalKind,
 } from './permissions.js';
+import {
+  buildReferenceChunkSql,
+  buildReferenceQueries,
+  packReferenceChunks,
+  type ReferenceChunk,
+  type ReferenceSource,
+} from './references.js';
+import {
+  roleGroupsFromEnv,
+  roleFromGroups,
+  planMembershipChange,
+  scimEq,
+  memberKind,
+  collapseMemberships,
+  ROLE_ORDER,
+  type RoleMembership,
+} from './roleGroups.js';
 import type {
   AttributeMapping,
   MappingExample,
@@ -80,9 +97,7 @@ const ACL_LABELS: Record<string, string> = {
   apps: 'AI Mapper app',
   warehouses: 'SQL warehouse',
   genie: 'Genie space',
-  'serving-endpoints': 'Knowledge Assistant endpoint',
   'vector-search-endpoints': 'Vector Search endpoint',
-  'knowledge-assistants': 'Knowledge Assistant',
 };
 const USER_PREFS_TABLE = `${CATALOG}.${SCHEMA}.aimapper_user_prefs`;
 // Source System = the EHR system TYPE a mapping's source data belongs to (Epic,
@@ -94,8 +109,10 @@ const SOURCE_SYSTEMS_TABLE = `${CATALOG}.${SCHEMA}.aimapper_domains`;
 // into the identify + generate prompts to steer mapping behavior for that EHR system.
 const SOURCE_SYSTEM_INSTRUCTIONS_TABLE = `${CATALOG}.${SCHEMA}.aimapper_domain_instructions`;
 // Every run/example belongs to one source system; unset/legacy rows are treated as
-// this default.
-const DEFAULT_SOURCE_SYSTEM = 'Epic';
+// the DEFAULT source system. Which one is default is fixed (is_default in the
+// source-systems table); its name can be edited, so the name is loaded from the table
+// on each request (cached) — 'Epic' is only the initial seed / fallback.
+let DEFAULT_SOURCE_SYSTEM = 'Epic';
 
 // A Project is the instance-level scope (e.g. two separate Epic installations map to
 // two projects). One source system per project; every mapping in the project inherits
@@ -152,36 +169,33 @@ const PROJECTS_CACHE_TTL_MS = 30_000;
 // profile (see PROMPT_PROFILES in prompts.ts): the generate handler trims optional
 // blocks (data samples, then few-shot) until the assembled prompt fits lim.maxPromptChars.
 
-// ---- Knowledge Assistant (reference-document grounding) --------------------
-// All three are OPTIONAL. With no KA endpoint configured, doc grounding is a
-// no-op and the app behaves exactly as before (mirrors the examples fallback).
-//   KA_ENDPOINT — the KA's query serving-endpoint; grounds discovery/generation.
-//   KA_ID       — the KA id ("<uuid>" or "knowledge-assistants/<uuid>"); enables
-//                 the in-app re-sync REST call.
-//   DOCS_VOLUME — the UC volume path reference PDFs are uploaded to.
-const KA_ENDPOINT = process.env.AIMAPPER_KA_ENDPOINT ?? '';
-const KA_ID = process.env.AIMAPPER_KA_ID ?? '';
+// ---- Reference-document grounding (Vector Search over parsed PDF chunks) -----
+// OPTIONAL: with AIMAPPER_DOCS_INDEX unset, mappings simply aren't doc-grounded.
+//   DOCS_VOLUME — the UC volume reference PDFs are uploaded to (one folder per source system).
 const GENIE_SPACE_ID = process.env.AIMAPPER_GENIE_SPACE_ID ?? '';
 const DOCS_VOLUME = `/Volumes/${CATALOG}/${SCHEMA}/reference_docs`;
+const DOCS_INDEX = process.env.AIMAPPER_DOCS_INDEX ?? '';
+const REFERENCE_CHUNKS_TABLE = `${CATALOG}.${SCHEMA}.aimapper_reference_chunks`;
+/** Nearest chunks fetched per retrieval query (before source-system filter + packing). */
+const REFERENCE_FETCH_PER_QUERY = 25;
 // Cap the grounding text injected into a prompt so it stays well within the
 // model context / the Apps ~120s proxy timeout.
-const MAX_REFERENCE_CONTEXT_CHARS = 4000;
-// Cap on TARGET column names named in the Knowledge Assistant question. Reference docs
-// are typically organized by target field, so naming every target column is how the
-// KA locates per-field entries. Names are short; this only bounds unusually wide targets.
-const MAX_REFERENCE_TARGET_COLUMNS = 120;
+const MAX_REFERENCE_CONTEXT_CHARS = 20000; // fallback; Prompt Sizing profiles set 10k/20k/30k
 
 // ---- roles & approval workflow (features 5) --------------------------------
 // Three personas: viewer (generate SQL + submit for review), editor (+ approve/
-// reject), admin (everything, incl. role management & delete). Roles are stored
-// in ROLES_TABLE (user_email -> role); users with no row default to 'viewer'.
-// Bootstrap admins via AIMAPPER_ADMINS (comma-separated emails) so the very
-// first login can manage everyone else.
+// reject), admin (everything, incl. role management & delete). Each role is an
+// ACCOUNT group (ROLE_GROUPS) that holds the role's resource permissions; a user's
+// role is the highest role group they belong to (directly or via a nested group).
+// Users in no role group default to 'viewer'. ROLES_TABLE is only an audit log of
+// in-app membership changes. Bootstrap admins via AIMAPPER_ADMINS (comma-separated
+// emails) so the very first login can manage everyone else.
 type Role = 'viewer' | 'editor' | 'admin';
 const ROLE_RANK: Record<Role, number> = { viewer: 0, editor: 1, admin: 2 };
 function isRole(v: string): v is Role {
   return v === 'viewer' || v === 'editor' || v === 'admin';
 }
+const ROLE_GROUPS: Record<Role, string> = roleGroupsFromEnv(process.env);
 const BOOTSTRAP_ADMINS = new Set(
   (process.env.AIMAPPER_ADMINS ?? '')
     .split(',')
@@ -325,8 +339,6 @@ export class AiMapper extends Plugin {
       appName: process.env.DATABRICKS_APP_NAME ?? null,
       warehouseId: process.env.DATABRICKS_WAREHOUSE_ID ?? null,
       genieSpaceId: GENIE_SPACE_ID || null,
-      kaEndpointId: KA_ENDPOINT ? await lookupId(`/api/2.0/serving-endpoints/${encodeURIComponent(KA_ENDPOINT)}`) : null,
-      kaId: KA_ID || null,
       vsEndpointId: VS_ENDPOINT ? await lookupId(`/api/2.0/vector-search/endpoints/${encodeURIComponent(VS_ENDPOINT)}`) : null,
     };
   }
@@ -484,6 +496,12 @@ export class AiMapper extends Plugin {
           results.push({ resource: g.label, access: g.privilege, status: 'granted' });
         }
       } catch (e) {
+        // App + Genie ACLs need the `access-management` scope, which apps can't request —
+        // setup/08_role_groups.py sets those two with the admin's CLI login instead.
+        if (missingScope(errMsg(e)) === 'access-management') {
+          results.push({ resource: g.label, access: g.kind === 'acl' ? g.level : g.privilege, status: 'skipped', detail: 'Set by setup/08_role_groups.py (an app sign-in can’t change this permission).' });
+          continue;
+        }
         results.push({ resource: g.label, access: g.kind === 'acl' ? g.level : g.privilege, status: 'failed', detail: errMsg(e) });
       }
     }
@@ -518,18 +536,59 @@ export class AiMapper extends Plugin {
     if (this.sourceSystemsTableEnsured) return;
     await this.execStatement(
       `CREATE TABLE IF NOT EXISTS ${SOURCE_SYSTEMS_TABLE} (
-         name STRING NOT NULL, description STRING, created_by STRING, created_at TIMESTAMP
+         name STRING NOT NULL, description STRING, created_by STRING, created_at TIMESTAMP,
+         is_default BOOLEAN COMMENT 'Exactly one row: the fallback source system (fixed; its name is editable)'
        ) USING DELTA`,
     );
-    // Seed the default source systems once (MERGE keeps it idempotent, no duplicates).
+    try {
+      const cols = await this.runQuery(`DESCRIBE TABLE ${SOURCE_SYSTEMS_TABLE}`);
+      if (!cols.some((c) => String(c.col_name ?? '').toLowerCase() === 'is_default')) {
+        await this.execStatement(`ALTER TABLE ${SOURCE_SYSTEMS_TABLE} ADD COLUMNS (is_default BOOLEAN COMMENT 'Exactly one row: the fallback source system (fixed; its name is editable)')`);
+      }
+    } catch { /* best-effort */ }
+    // Seed only an EMPTY table — seeding by name would resurrect a renamed default.
+    await this.execStatement(
+      `INSERT INTO ${SOURCE_SYSTEMS_TABLE} (name, description, created_by, created_at, is_default)
+       SELECT * FROM VALUES ('Epic', 'Seeded default source system', 'system', CURRENT_TIMESTAMP(), true),
+                            ('Cerner', 'Seeded default source system', 'system', CURRENT_TIMESTAMP(), false)
+       WHERE NOT EXISTS (SELECT 1 FROM ${SOURCE_SYSTEMS_TABLE})`,
+    );
+    // Mark a default once (pre-flag tables): 'Epic' if present, else the oldest row.
     await this.execStatement(
       `MERGE INTO ${SOURCE_SYSTEMS_TABLE} t
-       USING (SELECT 'Epic' AS name UNION ALL SELECT 'Cerner') s
+       USING (SELECT name FROM ${SOURCE_SYSTEMS_TABLE}
+              WHERE NOT EXISTS (SELECT 1 FROM ${SOURCE_SYSTEMS_TABLE} WHERE coalesce(is_default, false))
+              ORDER BY CASE WHEN name = 'Epic' THEN 0 ELSE 1 END, created_at LIMIT 1) s
        ON t.name = s.name
-       WHEN NOT MATCHED THEN INSERT (name, description, created_by, created_at)
-         VALUES (s.name, 'Seeded default source system', 'system', CURRENT_TIMESTAMP())`,
+       WHEN MATCHED THEN UPDATE SET is_default = true`,
     );
     this.sourceSystemsTableEnsured = true;
+  }
+
+  /** Load the default source system's current name into DEFAULT_SOURCE_SYSTEM (cached
+   * 60s; every request calls this so a rename on any replica is picked up quickly). */
+  private async refreshDefaultSourceSystem(): Promise<void> {
+    const name = await this.cachedRead('sources:default', async () => {
+      try {
+        await this.ensureSourceSystemsTable();
+        const rows = await this.runQuery(`SELECT name FROM ${SOURCE_SYSTEMS_TABLE} WHERE coalesce(is_default, false) LIMIT 1`);
+        return String(rows[0]?.name ?? '');
+      } catch {
+        return '';
+      }
+    }, 60_000);
+    if (name) DEFAULT_SOURCE_SYSTEM = name;
+  }
+
+  /** Source systems with descriptions, default first (Admin panel). */
+  private async listSourceSystemDetails(): Promise<{ name: string; description: string | null; isDefault: boolean }[]> {
+    return this.cachedRead('sources:details', async () => {
+      await this.ensureSourceSystemsTable();
+      const rows = await this.runQuery(
+        `SELECT name, description, coalesce(is_default, false) AS is_default FROM ${SOURCE_SYSTEMS_TABLE} ORDER BY coalesce(is_default, false) DESC, name`,
+      );
+      return rows.map((r) => ({ name: String(r.name ?? ''), description: r.description ?? null, isDefault: String(r.is_default).toLowerCase() === 'true' }));
+    });
   }
 
   /** List source-system names (sorted, default first). Falls back to the default on error.
@@ -939,35 +998,143 @@ export class AiMapper extends Plugin {
     return res;
   }
 
+  // ---- role groups (account groups that carry each role's permissions) ----------
+  // Membership is changed through the workspace's account-SCIM proxy as the app
+  // SERVICE PRINCIPAL: user sign-in tokens can't carry the `scim` scope, so the admin's
+  // own token can't edit groups. The SP must be a Group manager of the three groups
+  // (setup/08_role_groups.sh); routes check the caller is an app admin first.
+
+  /** Account SCIM call via the workspace proxy. Uses fetch (not apiClient) because the
+   * SDK drops PATCH bodies. */
+  private async accountScim<T>(method: 'GET' | 'PATCH', path: string, query?: Record<string, string>, body?: unknown): Promise<T | null> {
+    const client = this.serviceClient();
+    const headers = new Headers({ Accept: 'application/scim+json', 'Content-Type': 'application/scim+json' });
+    await client.config.authenticate(headers);
+    const url = new URL(`/api/2.0/account/scim/v2/${path}`, await client.config.getHost());
+    for (const [k, v] of Object.entries(query ?? {})) url.searchParams.set(k, v);
+    const resp = await fetch(url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+    const text = await resp.text();
+    if (!resp.ok) {
+      let detail = text;
+      try {
+        const j = JSON.parse(text) as { detail?: string; message?: string };
+        detail = j.detail ?? j.message ?? text;
+      } catch { /* not JSON */ }
+      throw new Error(`${resp.status} ${detail}`.trim());
+    }
+    return text ? (JSON.parse(text) as T) : null;
+  }
+
+  /** Account id of a user (by email) or group (by display name), or null if none. */
+  private async findAccountPrincipal(name: string, kind: PrincipalKind): Promise<{ id: string; display: string } | null> {
+    const r = await this.accountScim<{ Resources?: { id: string; userName?: string; displayName?: string }[] }>(
+      'GET',
+      kind === 'group' ? 'Groups' : 'Users',
+      { filter: scimEq(kind === 'group' ? 'displayName' : 'userName', name), attributes: 'id,userName,displayName' },
+    );
+    const hit = r?.Resources?.[0];
+    return hit ? { id: String(hit.id), display: String(kind === 'group' ? hit.displayName : hit.userName ?? name) } : null;
+  }
+
+  /** The three role groups' account ids (null = group not found → run setup). */
+  private async roleGroupIds(): Promise<Record<Role, string | null>> {
+    const res = await this.cachedRead('rolegroups:ids', async () => {
+      const out = {} as Record<Role, string | null>;
+      await Promise.all(ROLE_ORDER.map(async (r) => {
+        out[r] = (await this.findAccountPrincipal(ROLE_GROUPS[r], 'group'))?.id ?? null;
+      }));
+      return out;
+    }, 10 * 60_000);
+    if (ROLE_ORDER.some((r) => !res[r])) this.invalidateCache('rolegroups:ids');
+    return res;
+  }
+
+  /** Members of every role group, one row per principal at its highest role. */
+  private async listRoleMembers(): Promise<{
+    groups: { role: Role; name: string; id: string | null; members: number }[];
+    members: (RoleMembership & { principal: string; alsoIn: Role[] })[];
+  }> {
+    const ids = await this.roleGroupIds();
+    const raw: RoleMembership[] = [];
+    const counts = {} as Record<Role, number>;
+    await Promise.all(ROLE_ORDER.map(async (r) => {
+      counts[r] = 0;
+      const id = ids[r];
+      if (!id) return;
+      const g = await this.accountScim<{ members?: { value: string; display?: string; $ref?: string }[] }>('GET', `Groups/${id}`);
+      for (const m of g?.members ?? []) {
+        raw.push({ id: String(m.value), kind: memberKind(m.$ref), display: String(m.display ?? m.value), role: r });
+        counts[r]++;
+      }
+    }));
+    // SCIM members carry display names, not emails — resolve users' userName.
+    const members = await Promise.all(collapseMemberships(raw).map(async (m) => {
+      if (m.kind !== 'user') return { ...m, principal: m.display };
+      const u = await this.accountScim<{ userName?: string }>('GET', `Users/${m.id}`, { attributes: 'userName' }).catch(() => null);
+      return { ...m, principal: String(u?.userName ?? m.display) };
+    }));
+    return {
+      groups: ROLE_ORDER.slice().reverse().map((r) => ({ role: r, name: ROLE_GROUPS[r], id: ids[r], members: counts[r] })),
+      members,
+    };
+  }
+
+  /** Put `principal` in exactly `role`'s group (role=null → remove from all role
+   * groups). Returns a human-readable summary of what changed. */
+  private async setRoleMembership(name: string, kind: PrincipalKind, role: Role | null): Promise<string[]> {
+    if (kind === 'group' && ROLE_ORDER.some((r) => ROLE_GROUPS[r].toLowerCase() === name.toLowerCase())) {
+      throw new Error(`${name} is itself a role group and can't be nested into another.`);
+    }
+    const ids = await this.roleGroupIds();
+    const missing = ROLE_ORDER.filter((r) => !ids[r]);
+    if (missing.length) {
+      throw new Error(`Role group(s) not found: ${missing.map((r) => ROLE_GROUPS[r]).join(', ')}. Run setup/08_role_groups.sh first.`);
+    }
+    const who = await this.findAccountPrincipal(name, kind);
+    if (!who) {
+      throw new Error(kind === 'group'
+        ? `No account group named "${name}". Workspace-local groups can't be added to role groups — use an account group.`
+        : `No Databricks account user with email ${name}.`);
+    }
+    const memberOf: Role[] = [];
+    await Promise.all(ROLE_ORDER.map(async (r) => {
+      const g = await this.accountScim<{ members?: { value: string }[] }>('GET', `Groups/${ids[r]}`, { attributes: 'members' });
+      if ((g?.members ?? []).some((m) => String(m.value) === who.id)) memberOf.push(r);
+    }));
+    const plan = planMembershipChange(memberOf, role);
+    const patch = (r: Role, op: object) =>
+      this.accountScim('PATCH', `Groups/${ids[r]}`, undefined, { schemas: ['urn:ietf:params:scim:api:messages:2.0:PatchOp'], Operations: [op] });
+    const done: string[] = [];
+    const wrap = async (verb: string, r: Role, fn: () => Promise<unknown>) => {
+      try {
+        await fn();
+        done.push(`${verb} ${ROLE_GROUPS[r]}`);
+      } catch (e) {
+        const msg = errMsg(e);
+        const hint = /403|permission|not authorized|forbidden/i.test(msg)
+          ? ' — the app service principal must be a Group manager of the role groups (setup/08_role_groups.sh).'
+          : '';
+        throw new Error(`Couldn't ${verb === 'added to' ? 'add' : 'remove'} ${name} ${verb === 'added to' ? 'to' : 'from'} ${ROLE_GROUPS[r]}: ${msg}${hint}${done.length ? ` (already ${done.join(', ')})` : ''}`);
+      }
+    };
+    // Add first, then remove — a failed add never leaves the principal with no role.
+    if (plan.add) await wrap('added to', plan.add, () => patch(plan.add!, { op: 'add', path: 'members', value: [{ value: who.id }] }));
+    for (const r of plan.remove) await wrap('removed from', r, () => patch(r, { op: 'remove', path: `members[value eq "${who.id}"]` }));
+    // Roles are resolved from cached /Me groups — drop them so changes apply promptly.
+    this.invalidateCache('me-groups:');
+    return done;
+  }
+
   /**
    * Resolve the signed-in user's role. Bootstrap admins (env) always win so the
-   * app is never lockable-out; otherwise read the roles table; default 'viewer'.
+   * app is never lockable-out; otherwise the highest role group the user is in
+   * (SCIM /Me lists direct AND indirect groups); default 'viewer'.
    */
   private async currentRole(): Promise<Role> {
     const email = this.currentUser().toLowerCase();
     if (BOOTSTRAP_ADMINS.has(email)) return 'admin';
-    try {
-      await this.ensureRolesTable();
-      const groups = await this.currentUserGroups().catch(() => [] as string[]);
-      const groupClause = groups.length
-        ? ` OR (principal_type = 'group' AND lower(user_email) IN (${groups.map((g) => q(g)).join(', ')}))`
-        : '';
-      const rows = await this.runQuery(
-        `SELECT role FROM ${ROLES_TABLE}
-         WHERE (coalesce(principal_type, 'user') = 'user' AND lower(user_email) = ${q(email)})${groupClause}`,
-      );
-      // A user's effective role is the highest of their own assignment and any of
-      // their groups' assignments.
-      let best: Role | null = null;
-      for (const row of rows) {
-        const r = String(row.role ?? '').toLowerCase();
-        if (isRole(r) && (best === null || ROLE_RANK[r] > ROLE_RANK[best])) best = r;
-      }
-      if (best) return best;
-    } catch {
-      // Roles table unreadable/missing → safe default.
-    }
-    return 'viewer';
+    const groups = await this.currentUserGroups().catch(() => [] as string[]);
+    return roleFromGroups(groups, ROLE_GROUPS) ?? 'viewer';
   }
 
   /** Throw ForbiddenError (→403) unless the caller's role meets `min`. */
@@ -1704,12 +1871,209 @@ export class AiMapper extends Plugin {
     return { examples: packed, method };
   }
 
-  // ---- Knowledge Assistant: reference-document grounding ------------------
-  /** True when a KA query endpoint is configured (doc grounding is available). */
-  private kaConfigured(): boolean {
-    return KA_ENDPOINT.trim().length > 0;
+  // ---- Reference documents: Vector Search chunks ---------------------------
+  /** Execute a statement that may outlive the 50s synchronous wait (e.g. parsing a
+   * long PDF): poll until it finishes. Throws on failure or after `timeoutMs`. */
+  private async runLongStatement(statement: string, timeoutMs = 15 * 60_000): Promise<void> {
+    const client = this.ctx().client;
+    let resp = await this.execStatement(statement);
+    const started = Date.now();
+    while (resp.status?.state === 'PENDING' || resp.status?.state === 'RUNNING') {
+      if (Date.now() - started > timeoutMs) throw new Error('Statement timed out');
+      await new Promise((r) => setTimeout(r, 3000));
+      resp = await client.statementExecution.getStatement({ statement_id: resp.statement_id ?? '' });
+    }
+    if (resp.status?.state !== 'SUCCEEDED') throw new Error(resp.status?.error?.message ?? `Statement ${resp.status?.state ?? 'failed'}`);
   }
 
+  /** Background re-index state (one run at a time per replica). */
+  private refIndex: { running: boolean; startedAt: string | null; finishedAt: string | null; lastError: string | null; filesParsed: number; filesRemoved: number } =
+    { running: false, startedAt: null, finishedAt: null, lastError: null, filesParsed: 0, filesRemoved: 0 };
+
+  /** Recursively list reference files in the docs volume (path, size, modified ms). */
+  private async listReferenceFiles(): Promise<{ path: string; size: number | null; modified: number | null }[]> {
+    const client = this.ctx().client;
+    const out: { path: string; size: number | null; modified: number | null }[] = [];
+    const walk = async (dir: string, depth: number) => {
+      for await (const e of client.files.listDirectoryContents({ directory_path: dir })) {
+        const p = e.path ?? '';
+        if (e.is_directory) { if (depth < 3) await walk(p, depth + 1); continue; }
+        const name = p.split('/').pop() ?? '';
+        if (!p || name.startsWith('.') || name.startsWith('_')) continue;
+        out.push({ path: p, size: e.file_size ?? null, modified: e.last_modified ?? null });
+      }
+    };
+    await walk(DOCS_VOLUME, 0);
+    return out;
+  }
+
+  /** Re-index reference documents into the chunks table, then sync the index.
+   * `only` = specific file paths (upload/delete); otherwise reconcile the whole
+   * volume: parse new/changed files, drop chunks of files that no longer exist. */
+  private async reindexReferenceDocs(only?: string[]): Promise<void> {
+    if (!DOCS_INDEX.trim()) return;
+    if (this.refIndex.running) return;
+    this.refIndex = { running: true, startedAt: new Date().toISOString(), finishedAt: null, lastError: null, filesParsed: 0, filesRemoved: 0 };
+    try {
+      const listed = await this.listReferenceFiles();
+      const present = new Map(listed.map((f) => [f.path, f]));
+      const indexed = await this.runQuery(
+        `SELECT file_path, max(file_size) AS file_size, max(unix_millis(file_modified)) AS modified_ms FROM ${REFERENCE_CHUNKS_TABLE} GROUP BY file_path`,
+      );
+      const indexedBy = new Map(indexed.map((r) => [String(r.file_path), r]));
+      const candidates = only ?? [...new Set([...present.keys(), ...indexedBy.keys()])];
+      const failures: string[] = [];
+      for (const path of candidates) {
+        const file = present.get(path);
+        const row = indexedBy.get(path);
+        if (!file) {
+          if (row) {
+            await this.runLongStatement(`DELETE FROM ${REFERENCE_CHUNKS_TABLE} WHERE file_path = ${q(path)}`);
+            this.refIndex.filesRemoved++;
+          }
+          continue;
+        }
+        const unchanged =
+          !!row && Number(row.file_size ?? -1) === (file.size ?? -2) &&
+          Math.floor(Number(row.modified_ms ?? 0) / 1000) === Math.floor((file.modified ?? 0) / 1000);
+        if (unchanged && !only) continue;
+        try {
+          await this.runLongStatement(`DELETE FROM ${REFERENCE_CHUNKS_TABLE} WHERE file_path = ${q(path)}`);
+          await this.runLongStatement(`INSERT INTO ${REFERENCE_CHUNKS_TABLE} ${buildReferenceChunkSql(path, false)}`);
+          this.refIndex.filesParsed++;
+        } catch (e) {
+          // One unparseable file (e.g. a .txt — ai_parse_document reads PDF/Office/images)
+          // must not stop the rest; report it and continue.
+          const name = path.split('/').pop() ?? path;
+          failures.push(`${name}: ${errMsg(e).slice(0, 200)}`);
+        }
+      }
+      if (failures.length) this.refIndex.lastError = `Could not index ${failures.length} file(s) — ${failures.join(' | ')}`;
+      try {
+        await this.ctx().client.vectorSearchIndexes.syncIndex({ index_name: DOCS_INDEX });
+      } catch (e) {
+        // Mid-sync or not ready: the hourly sync job picks the changes up.
+        console.warn(`[aimapper] reference index sync deferred: ${errMsg(e)}`);
+      }
+      this.invalidateCache('refdocs:');
+    } catch (e) {
+      this.refIndex.lastError = errMsg(e);
+      console.warn(`[aimapper] reference re-index failed: ${errMsg(e)}`);
+    } finally {
+      this.refIndex.running = false;
+      this.refIndex.finishedAt = new Date().toISOString();
+    }
+  }
+
+  /** Move a source system's reference documents to its renamed folder and re-point
+   * their indexed passages (no re-parse). Returns warnings; never throws. */
+  private async moveReferenceDocs(oldName: string, newName: string): Promise<string[]> {
+    const warnings: string[] = [];
+    const from = this.docsDir(oldName);
+    const to = this.docsDir(newName);
+    if (from === to) return warnings;
+    let files: { path: string }[] = [];
+    try {
+      files = (await this.listReferenceFiles()).filter((f) => f.path.startsWith(`${from}/`));
+    } catch (e) {
+      return [`reference documents: couldn't list ${from} (${errMsg(e).slice(0, 160)})`];
+    }
+    const api = this.ctx().client.apiClient;
+    const host = (await api.host).toString().replace(/\/$/, '');
+    const authed = async (extra: Record<string, string> = {}) => {
+      const h = new Headers(extra);
+      await api.config.authenticate(h);
+      return h;
+    };
+    const enc = (p: string) => p.split('/').map(encodeURIComponent).join('/');
+    for (const f of files) {
+      const dest = `${to}${f.path.slice(from.length)}`;
+      try {
+        const got = await fetch(`${host}/api/2.0/fs/files${enc(f.path)}`, { headers: await authed() });
+        if (!got.ok) throw new Error(`download ${got.status}`);
+        const bytes = Buffer.from(await got.arrayBuffer());
+        const put = await fetch(`${host}/api/2.0/fs/files${enc(dest)}?overwrite=true`, {
+          method: 'PUT', headers: await authed({ 'Content-Type': 'application/octet-stream' }), body: bytes,
+        });
+        if (!put.ok) throw new Error(`upload ${put.status}`);
+        const meta = await fetch(`${host}/api/2.0/fs/files${enc(dest)}`, { method: 'HEAD', headers: await authed() });
+        const modified = Date.parse(meta.headers.get('last-modified') ?? '');
+        await this.runLongStatement(
+          `UPDATE ${REFERENCE_CHUNKS_TABLE} SET file_path = ${q(dest)}, source_system = ${q(newName)}` +
+            (Number.isFinite(modified) ? `, file_modified = timestamp_millis(${modified})` : '') +
+            ` WHERE file_path = ${q(f.path)}`,
+        ).catch(() => undefined); // table may not exist when grounding is off
+        await this.ctx().client.files.delete({ file_path: f.path });
+      } catch (e) {
+        warnings.push(`reference document ${f.path.split('/').pop()}: ${errMsg(e).slice(0, 160)} — re-upload it under ${newName}`);
+      }
+    }
+    if (!warnings.length) {
+      await fetch(`${host}/api/2.0/fs/directories${enc(from)}`, { method: 'DELETE', headers: await authed() }).catch(() => undefined);
+    }
+    if (files.length && DOCS_INDEX.trim()) {
+      try { await this.ctx().client.vectorSearchIndexes.syncIndex({ index_name: DOCS_INDEX }); } catch { /* hourly job catches up */ }
+    }
+    return warnings;
+  }
+
+  /** Start a re-index without blocking the request (the Apps proxy times out ~120s). */
+  private startReindex(only?: string[]): void {
+    void this.reindexReferenceDocs(only);
+  }
+
+  /** Chunk counts per indexed file + totals (for the References status card). */
+  private async referenceIndexStats(): Promise<{ chunks: number; files: number; lastIndexedAt: string | null; perFile: Record<string, number> }> {
+    return this.cachedRead('refdocs:stats', async () => {
+      const rows = await this.runQuery(
+        `SELECT file_path, count(*) AS n, max(indexed_at) AS last FROM ${REFERENCE_CHUNKS_TABLE} GROUP BY file_path`,
+      ).catch(() => [] as Record<string, string | null>[]);
+      const perFile: Record<string, number> = {};
+      let chunks = 0;
+      let last: string | null = null;
+      for (const r of rows) {
+        const n = intOr(r.n ?? null, 0);
+        perFile[String(r.file_path)] = n;
+        chunks += n;
+        if (r.last && (!last || String(r.last) > last)) last = String(r.last);
+      }
+      return { chunks, files: rows.length, lastIndexedAt: last, perFile };
+    }, 30_000);
+  }
+
+  /** Retrieve + pack reference chunks for a mapping (see references.ts). */
+  private async loadReferenceChunks(
+    targetTable: string,
+    targetColumns: string[],
+    sourceColumns: string[],
+    sourceSystem: string | undefined,
+    budgetChars: number,
+  ): Promise<{ text: string; sources: ReferenceSource[] }> {
+    const queries = buildReferenceQueries(targetTable, targetColumns, sourceColumns);
+    const ss = (sourceSystem ?? '').trim();
+    const results = await Promise.all(
+      queries.map(async (qt) => {
+        const rows = await this.runQuery(
+          `SELECT chunk_id, file_name, page_start, page_end, heading, content, search_score FROM (
+             SELECT * FROM vector_search(index => ${q(DOCS_INDEX)}, query_text => ${q(qt)}, num_results => ${REFERENCE_FETCH_PER_QUERY})
+           )${ss ? ` WHERE lower(source_system) = ${q(ss.toLowerCase())}` : ''}`,
+        );
+        return rows.map((r): ReferenceChunk => ({
+          chunk_id: String(r.chunk_id ?? ''),
+          file_name: String(r.file_name ?? ''),
+          page_start: r.page_start == null ? null : Number(r.page_start),
+          page_end: r.page_end == null ? null : Number(r.page_end),
+          heading: r.heading ?? null,
+          content: String(r.content ?? ''),
+          score: Number(r.search_score ?? 0),
+        }));
+      }),
+    );
+    const packed = packReferenceChunks(results, budgetChars);
+    return { text: packed.text, sources: packed.sources };
+  }
+
+  // ---- reference-document grounding ---------------------------------------
   /** The volume directory that holds a source system's reference docs (a per-source-
    * system subfolder). Source-system names are constrained by their route, but
    * sanitize again here as defense-in-depth against path traversal. */
@@ -1720,193 +2084,30 @@ export class AiMapper extends Plugin {
   }
 
   /**
-   * Query the Knowledge Assistant for guidance relevant to mapping `targetTable`
-   * (given the source columns in play), returning a grounding passage to inject
-   * into the prompt — or '' if no KA is configured or the call fails. Best-effort
-   * by design: grounding must never break a mapping (mirrors loadExamplesFor).
+   * Reference passages relevant to mapping `targetTable`, retrieved from the Vector
+   * Search index over parsed reference PDFs — or empty if no index is configured or
+   * retrieval fails. Best-effort by design: grounding must never break a mapping.
    */
-  private async loadReferenceContext(targetTable: string, sourceColumns: string[], sourceSystem?: string, maxQueryColumns: number = 40, maxContextChars: number = MAX_REFERENCE_CONTEXT_CHARS, targetColumns: string[] = []): Promise<string> { // reconstructed: signature tail after maxContextChars was cut off
-    if (!this.kaConfigured()) return '';
-    const cols = sourceColumns.filter(Boolean).slice(0, maxQueryColumns).join(', ');
-    const tcols = targetColumns.filter(Boolean).slice(0, MAX_REFERENCE_TARGET_COLUMNS).join(', ');
-    const ss = (sourceSystem ?? '').trim();
-    // NOTE: the managed KA indexes the whole volume as one corpus with no per-folder
-    // query filter, so source-system scoping here is SOFT — we steer the KA to prefer
-    // the source system's documents rather than hard-isolating them.
-    const sourceSystemHint = ss
-      ? ` Focus on documentation for the "${ss}" source system (its files are under a "${ss}/" folder); ignore other systems' docs.`
-      : '';
-    const question =
-      `From the source-metadata reference documents, summarize any field definitions, ` +
-      `value codings, and transformation rules relevant to mapping data into the ` +
-      `"${targetTable}" target entity.` + sourceSystemHint +
-      (tcols
-        ? ` The target columns are: ${tcols}. For EACH target column the documents cover, ` +
-          `give one line in the form "target_column <- source_table.source_column; rule" ` +
-          `(always include the source TABLE name, not just the field; list every contributing ` +
-          `source column if several are combined, and note when ` +
-          `the documents say there is no source match). Do not skip documented columns.`
-        : '') +
-      (cols ? ` Candidate source columns include: ${cols}.` : '') +
-      ` Respond concisely with only the facts useful for writing the mapping SQL; if the ` +
-      `documents say nothing relevant, respond with "No relevant reference found."`;
+  private async loadReferenceContext(targetTable: string, sourceColumns: string[], sourceSystem?: string, maxQueryColumns: number = 40, maxContextChars: number = MAX_REFERENCE_CONTEXT_CHARS, targetColumns: string[] = []): Promise<{ text: string; sources: ReferenceSource[] }> {
+    if (!DOCS_INDEX.trim()) return { text: '', sources: [] };
     try {
-      const answer = await this.queryKnowledgeAssistant(question);
-      const trimmed = answer.trim();
-      if (!trimmed || /no relevant reference found/i.test(trimmed)) return '';
-      return trimmed.slice(0, maxContextChars);
-    } catch {
-      // KA offline / not yet synced / no CAN_QUERY — proceed without grounding.
-      return '';
+      return await this.loadReferenceChunks(targetTable, targetColumns, sourceColumns.slice(0, maxQueryColumns), sourceSystem, maxContextChars);
+    } catch (e) {
+      // Index not ready / no access — proceed without grounding (never break a mapping).
+      console.warn(`[aimapper] reference chunk retrieval failed: ${errMsg(e)}`);
+      return { text: '', sources: [] };
     }
   }
 
   /**
-   * Query the Knowledge Assistant serving endpoint. Unlike the chat LLM endpoints
-   * (`invokeLlm`), a KA endpoint speaks the **Responses API**: the request body
-   * uses `input` (not `messages`) and the reply is a `response` object whose text
-   * lives in an `output` array of message items. We POST directly to the endpoint
-   * invocations path and extract the assistant text defensively.
-   */
-  private async queryKnowledgeAssistant(question: string): Promise<string> {
-    const ctx = this.ctx();
-    const resp = await ctx.client.apiClient.request({
-      path: `/serving-endpoints/${KA_ENDPOINT}/invocations`,
-      method: 'POST',
-      headers: new Headers({ 'Content-Type': 'application/json' }),
-      raw: false,
-      payload: { input: [{ role: 'user', content: question }] },
-    });
-    return extractResponsesText(resp);
-  }
-
-  /** The KA resource name, accepting either a bare id or the full resource name. */
-  private kaResourceName(): string {
-    return KA_ID.includes('/') ? KA_ID : `knowledge-assistants/${KA_ID}`;
-  }
-
-  /**
-   * A service-principal WorkspaceClient (default env auth in a deployed App).
-   * The knowledge-assistants API requires the broad `all-apis` scope, which is NOT
-   * a granular scope the app can list in `user_api_scopes` — so an OBO/user token
-   * can never carry it, and re-authorizing wouldn't help. The KA is an app-managed
-   * resource (not user data), so we manage it as the SP. Cached after first use.
+   * A service-principal WorkspaceClient (default env auth in a deployed App). Used
+   * where a user token can't work: role-group membership (needs the `scim` scope,
+   * which apps can't request) and the principals fallback. Cached after first use.
    */
   private spClient: WorkspaceClient | null = null;
   private serviceClient(): WorkspaceClient {
     if (!this.spClient) this.spClient = new WorkspaceClient({}); // {} = default env auth (SP)
     return this.spClient;
-  }
-
-  /** Trigger a KA knowledge-source re-sync via the REST API, as the service principal. */
-  private async syncKnowledgeAssistant(): Promise<void> {
-    if (!KA_ID.trim()) throw new Error('AIMAPPER_KA_ID is not set; cannot sync the Knowledge Assistant.');
-    // The sync trigger is a custom action verb (`:sync`) on the knowledge-sources
-    // collection — NOT a `/sync-knowledge-sources` sub-resource. The latter 404s
-    // with "No API found". Confirmed via `knowledge-assistants sync-knowledge-sources
-    // --debug`, which issues POST .../knowledge-sources:sync.
-    await this.serviceClient().apiClient.request({
-      path: `/api/2.1/${this.kaResourceName()}/knowledge-sources:sync`,
-      method: 'POST',
-      headers: new Headers({ 'Content-Type': 'application/json' }),
-      raw: false,
-      payload: {},
-    });
-  }
-
-  /** Fetch KA details (status, endpoint, knowledge sources) via the REST API, as the
-   * service principal. Best-effort: returns null on any failure so the admin view
-   * degrades gracefully. Knowledge sources are a SEPARATE list endpoint (bare array). */
-  private async getKnowledgeAssistantDetails(): Promise<Record<string, unknown> | null> {
-    if (!KA_ID.trim()) return null;
-    const sp = this.serviceClient();
-    const headers = new Headers({ 'Content-Type': 'application/json' });
-    try {
-      const resp = (await sp.apiClient.request({
-        path: `/api/2.1/${this.kaResourceName()}`,
-        method: 'GET',
-        headers,
-        raw: false,
-      })) as Record<string, unknown> | null;
-      if (!resp) return null;
-      // The 2.1 API returns a flat shape { display_name, state, endpoint_name,
-      // create_time }; older/2.0 nested it under knowledge_assistant.tile. Handle
-      // both defensively and normalize to the flat shape the Admin UI expects.
-      const inner = (resp.knowledge_assistant ?? resp) as Record<string, unknown>;
-      const tile = (inner.tile ?? inner) as Record<string, unknown>;
-      const endpointName = (tile.serving_endpoint_name ?? inner.endpoint_name ?? KA_ENDPOINT) as string | null;
-      const ka: Record<string, unknown> = {
-        display_name: tile.name ?? inner.display_name ?? null,
-        state: tile.state ?? tile.status ?? inner.state ?? null,
-        endpoint_name: endpointName,
-        create_time: tile.creation_timestamp_ms ?? inner.create_time ?? null,
-      };
-      // The KA GET (SP shape) omits `state`; derive a meaningful "is it queryable"
-      // status from the KA's serving endpoint readiness instead (SDK, reliable).
-      if (!ka.state && endpointName) {
-        try {
-          const ep = (await sp.apiClient.request({
-            path: `/api/2.0/serving-endpoints/${endpointName}`,
-            method: 'GET',
-            headers,
-            raw: false,
-          })) as Record<string, unknown> | null;
-          const st = (ep?.state ?? {}) as Record<string, unknown>;
-          ka.state = st.ready === 'READY' ? 'ONLINE' : (st.ready ?? null);
-        } catch {
-          // leave state null — card renders without a badge
-        }
-      }
-      // Sources come from a separate endpoint (bare array). Best-effort.
-      try {
-        const sources = await sp.apiClient.request({
-          path: `/api/2.1/${this.kaResourceName()}/knowledge-sources`,
-          method: 'GET',
-          headers,
-          raw: false,
-        });
-        if (Array.isArray(sources)) ka.knowledge_sources = sources;
-      } catch {
-        // leave sources unset — the KA detail card still renders.
-      }
-      return ka;
-    } catch {
-      return null;
-    }
-  }
-
-  /** KA knowledge-source sync status: { state, lastSyncedAt }. state is UPDATING while
-   * a sync runs, UPDATED when done — the UI polls this to stop the spinner. lastSyncedAt
-   * comes from knowledge_cutoff_time (the indexed-data freshness). Best-effort → nulls. */
-  private async knowledgeSourceStatus(): Promise<{ state: string | null; lastSyncedAt: string | null }> {
-    if (!KA_ID.trim()) return { state: null, lastSyncedAt: null };
-    try {
-      const resp = await this.serviceClient().apiClient.request({
-        path: `/api/2.1/${this.kaResourceName()}/knowledge-sources`,
-        method: 'GET',
-        headers: new Headers({ 'Content-Type': 'application/json' }),
-        raw: false,
-      });
-      // Response may be a bare array or { knowledge_sources: [...] }.
-      const arr: unknown[] = Array.isArray(resp)
-        ? resp
-        : ((resp as Record<string, unknown>)?.knowledge_sources as unknown[] | undefined) ?? [];
-      if (arr.length === 0) return { state: null, lastSyncedAt: null };
-      // Aggregate: UPDATING if any source is still updating; newest cutoff time.
-      let anyUpdating = false;
-      let latest: string | null = null;
-      for (const s of arr) {
-        const o = s as Record<string, unknown>;
-        const st = (typeof o.state === 'string' ? o.state : '').toUpperCase();
-        if (st && st !== 'UPDATED') anyUpdating = true;
-        const t = typeof o.knowledge_cutoff_time === 'string' ? o.knowledge_cutoff_time
-          : typeof o.last_synced_at === 'string' ? o.last_synced_at : undefined;
-        if (t && (!latest || t > latest)) latest = t;
-      }
-      return { state: anyUpdating ? 'UPDATING' : 'UPDATED', lastSyncedAt: latest };
-    } catch {
-      return { state: null, lastSyncedAt: null };
-    }
   }
 
   // ---- routes -------------------------------------------------------------
@@ -1919,7 +2120,10 @@ export class AiMapper extends Plugin {
       work: () => Promise<unknown>,
     ): Promise<void> =>
       this.asUser(req)
-        .inUserScope(work)
+        .inUserScope(async () => {
+          await this.refreshDefaultSourceSystem();
+          return work();
+        })
         .then((body) => {
           if (!res.headersSent) res.json(body);
         })
@@ -2347,16 +2551,17 @@ export class AiMapper extends Plugin {
       const targetCols = target.columns.map((c) => c.target_column);
       const validCols = new Map(sources.map((s) => [s.table, new Set(s.columns.map((c) => c.name))]));
       // Steer discovery with prior user feedback (👍/👎) for this target+project, and
-      // ground it in the reference documents (Knowledge Assistant), if configured.
+      // ground it in the reference documents (Vector Search passages), if configured.
       const lim = await this.loadPromptLimits();
       const allSourceCols = sources.flatMap((s) => s.columns.map((c) => c.name));
       // Endpoint selection: an explicit request wins; 'auto' routes by task size.
       const useEndpoint = await this.selectEndpoint(endpoint, { targetCols: target.columns.length, sourceCols: allSourceCols.length, sourceTables: sources.length, maxExampleChars: 0 });
-      const [feedback, referenceContext, instructions] = await Promise.all([
+      const [feedback, reference, instructions] = await Promise.all([
         this.loadFeedback(target.target_table, pid),
         this.loadReferenceContext(target.target_table, allSourceCols, ss, lim.maxReferenceQueryColumns, lim.maxReferenceContextChars, targetCols),
         this.loadSourceSystemInstructions(ss),
       ]);
+      const referenceContext = reference.text;
       // Wide targets produce large JSON; a low token cap truncates it mid-array and the
       // parse fails. Give it plenty of room, and if a response still won't parse, retry —
       // a fresh generation usually comes back clean AND complete. Each retry uses a STRICT
@@ -2591,12 +2796,13 @@ export class AiMapper extends Plugin {
         },
       });
 
-      // Ground generation in the reference documents (Knowledge Assistant), if configured,
+      // Ground generation in the reference documents (Vector Search passages), if configured,
       // and steer it with the source system's admin/editor-authored mapping instructions.
-      const [referenceContext, sourceSystemInstructions] = await Promise.all([
+      const [reference, sourceSystemInstructions] = await Promise.all([
         this.loadReferenceContext(target.target_table, mappedCols, ss, lim.maxReferenceQueryColumns, lim.maxReferenceContextChars, target.columns.map((c) => c.target_column)),
         this.loadSourceSystemInstructions(ss),
       ]);
+      const referenceContext = reference.text;
       // Combine durable source-system instructions with the caller's per-run instructions
       // (a contextual tweak for THIS generation). Both are injected as guidance; the
       // per-run note is capped so it can't blow up the prompt.
@@ -2674,6 +2880,7 @@ export class AiMapper extends Plugin {
           examplesOriginal: examples.length,
           referenceUsed: referenceContext.length > 0,
           referenceContextChars: referenceContext.length,
+          referenceSources: reference.sources,
           sampleDataUsed: sampleData === true,
           sampleContextChars: sc.length,
           sqlLength: sql.length,
@@ -2690,7 +2897,7 @@ export class AiMapper extends Plugin {
         return {
           sql, readOnly: false, examplesUsed: ex.length,
           examplesTruncated: ex.filter((e) => (e.generated_sql ?? '').length > lim.maxExampleSqlChars).length,
-          referenceUsed: referenceContext.length > 0, promptTrimmed, retrievalMethod,
+          referenceUsed: referenceContext.length > 0, referenceSources: reference.sources, promptTrimmed, retrievalMethod,
           crossProject: scope.crossProject, tokens: usage, selectedEndpoint: autoRouted ? useGenEndpoint : undefined, outputTruncated: true,
           traceId: genTraceId,
           message: `SQL generation hit the output token limit (${completionTokens} tokens) and was cut off. Increase the Prompt Sizing profile (Admin → Prompt sizing) to "Generous" and regenerate.`,
@@ -2699,7 +2906,7 @@ export class AiMapper extends Plugin {
       // Warn when an injected example's SQL exceeded the per-example cap and was cut.
       const examplesTruncated = ex.filter((e) => (e.generated_sql ?? '').length > lim.maxExampleSqlChars).length;
       logGenStep({ outputTruncated: false, readOnly: isReadOnlySql(sql) });
-      return { sql, readOnly: isReadOnlySql(sql), examplesUsed: ex.length, examplesTruncated, referenceUsed: referenceContext.length > 0, promptTrimmed, retrievalMethod, crossProject: scope.crossProject, tokens: usage, selectedEndpoint: autoRouted ? useGenEndpoint : undefined, traceId: genTraceId }; // reconstructed: tail after promptTrimmed cut off; assumed unchanged + traceId
+      return { sql, readOnly: isReadOnlySql(sql), examplesUsed: ex.length, examplesTruncated, referenceUsed: referenceContext.length > 0, referenceSources: reference.sources, promptTrimmed, retrievalMethod, crossProject: scope.crossProject, tokens: usage, selectedEndpoint: autoRouted ? useGenEndpoint : undefined, traceId: genTraceId }; // reconstructed: tail after promptTrimmed cut off; assumed unchanged + traceId
     });
 
     // 9. Validate generated SQL: dry-run (LIMIT 0) + diff vs the target schema.
@@ -3058,15 +3265,49 @@ VALUES\n${rowSql.join(',\n')}`;
       return { ok: true, from: outcome.from, to: outcome.to };
     });
 
-    // 13c. Roles: list all assignments (admin only).
+    // 13c. Roles: role groups + their members (admin only). Membership is the
+    // source of truth; ROLES_TABLE only adds "changed by / when" for in-app changes.
     get('roles', '/roles', async () => {
       this.assertCatalog();
       await this.requireRole('admin');
       await this.ensureRolesTable();
-      const rows = await this.runQuery(
-        `SELECT user_email, role, updated_by, updated_at, coalesce(principal_type, 'user') AS principal_type FROM ${ROLES_TABLE} ORDER BY principal_type DESC, user_email`,
-      );
-      return { roles: rows, bootstrapAdmins: [...BOOTSTRAP_ADMINS] };
+      let groups: Awaited<ReturnType<AiMapper['listRoleMembers']>>['groups'] = ROLE_ORDER.slice().reverse().map((r) => ({ role: r, name: ROLE_GROUPS[r], id: null, members: 0 }));
+      let members: Awaited<ReturnType<AiMapper['listRoleMembers']>>['members'] = [];
+      let error: string | null = null;
+      try {
+        ({ groups, members } = await this.listRoleMembers());
+      } catch (e) {
+        error = `Couldn't read the role groups: ${errMsg(e)}`;
+      }
+      const audit = await this.runQuery(
+        `SELECT lower(user_email) AS k, coalesce(principal_type, 'user') AS t, updated_by, updated_at FROM ${ROLES_TABLE}`,
+      ).catch(() => [] as Record<string, string | null>[]);
+      const auditBy = new Map(audit.map((a) => [`${a.t}:${a.k}`, a]));
+      // Groups whose permissions were applied in-app (ledger rows) and when.
+      const applied = await this.runQuery(
+        `SELECT lower(principal) AS p, count(*) AS n, max(granted_at) AS at FROM ${GRANTS_LEDGER_TABLE} WHERE principal_type = 'group' GROUP BY lower(principal)`,
+      ).catch(() => [] as Record<string, string | null>[]);
+      const appliedBy = new Map(applied.map((a) => [String(a.p), a]));
+      return {
+        groups: groups.map((g) => {
+          const a = appliedBy.get(g.name.toLowerCase());
+          return { ...g, grantsApplied: Number(a?.n ?? 0), lastAppliedAt: a?.at ?? null };
+        }),
+        members: members.map((m) => {
+          const a = auditBy.get(`${m.kind === 'group' ? 'group' : 'user'}:${m.principal.toLowerCase()}`);
+          return {
+            principal: m.principal,
+            principalType: m.kind,
+            displayName: m.display,
+            role: m.role,
+            alsoIn: m.alsoIn,
+            updatedBy: a?.updated_by ?? null,
+            updatedAt: a?.updated_at ?? null,
+          };
+        }),
+        bootstrapAdmins: [...BOOTSTRAP_ADMINS],
+        error,
+      };
     });
 
     // 13c2. Workspace users + groups for the role picker (admin only).
@@ -3076,61 +3317,69 @@ VALUES\n${rowSql.join(',\n')}`;
       return this.listWorkspacePrincipals();
     });
 
-    // 13d. Roles: upsert a user's role (admin only).
+    // 13d. Roles: put a user/group in a role (admin only) = add them to that role's
+    // group and remove them from the other role groups. No per-user grants: the role
+    // groups already hold the permissions.
     post('roles-set', '/roles', async (req, res) => {
       this.assertCatalog();
       await this.requireRole('admin');
       await this.ensureRolesTable();
       const { userEmail, role, principalType } = req.body as { userEmail?: string; role?: string; principalType?: string };
-      const type = principalType === 'group' ? 'group' : 'user';
-      // Users are keyed by lower-cased email; groups keep their display name as-is
-      // (matching is case-insensitive either way).
-      const email = type === 'group' ? (userEmail ?? '').trim() : (userEmail ?? '').trim().toLowerCase();
+      const type: PrincipalKind = principalType === 'group' ? 'group' : 'user';
+      const name = type === 'group' ? (userEmail ?? '').trim() : (userEmail ?? '').trim().toLowerCase();
       const r = (role ?? '').trim().toLowerCase();
-      if (!email || !isRole(r)) {
+      if (!name || !isRole(r)) {
         res.status(400).json({ error: 'userEmail and a valid role (viewer|editor|admin) are required' });
         return undefined;
       }
-      const admin = this.currentUser();
-      // MERGE so a principal has at most one role row.
-      const resp = await this.execStatement(
+      const changes = await this.setRoleMembership(name, type, r);
+      await this.execStatement(
         `MERGE INTO ${ROLES_TABLE} t
-         USING (SELECT ${q(email)} AS user_email, ${q(r)} AS role, ${q(admin)} AS updated_by, CURRENT_TIMESTAMP() AS updated_at, ${q(type)} AS principal_type) s
+         USING (SELECT ${q(name)} AS user_email, ${q(r)} AS role, ${q(this.currentUser())} AS updated_by, CURRENT_TIMESTAMP() AS updated_at, ${q(type)} AS principal_type) s
          ON lower(t.user_email) = lower(s.user_email) AND coalesce(t.principal_type, 'user') = s.principal_type
          WHEN MATCHED THEN UPDATE SET t.role = s.role, t.updated_by = s.updated_by, t.updated_at = s.updated_at
          WHEN NOT MATCHED THEN INSERT (user_email, role, updated_by, updated_at, principal_type)
            VALUES (s.user_email, s.role, s.updated_by, s.updated_at, s.principal_type)`,
-      );
-      if (resp.status?.state !== 'SUCCEEDED') throw new Error(resp.status?.error?.message ?? 'Role update failed');
-      const permissions = await this.syncRolePermissions(email, type, r);
-      return { ok: true, userEmail: email, role: r, permissions };
+      ).catch(() => undefined); // audit only
+      return { ok: true, userEmail: name, role: r, group: ROLE_GROUPS[r], changes };
     });
 
-    // 13e. Roles: remove a user's assignment → reverts them to default 'viewer' (admin only).
+    // 13e. Roles: remove a user/group from every role group → default Viewer (admin only).
     del('roles-delete', '/roles', async (req, res) => {
       this.assertCatalog();
       await this.requireRole('admin');
       await this.ensureRolesTable();
-      const type = (qstr(req.query.principalType) || (req.body as { principalType?: string })?.principalType) === 'group' ? 'group' : 'user';
-      const email = (qstr(req.query.userEmail) || (req.body as { userEmail?: string })?.userEmail || '').trim().toLowerCase();
-      if (!email) { res.status(400).json({ error: 'userEmail is required' }); return undefined; }
-      // Grants use the principal's stored name (groups keep their original case).
-      const stored = await this.runQuery(
-        `SELECT user_email FROM ${ROLES_TABLE} WHERE lower(user_email) = ${q(email)} AND coalesce(principal_type, 'user') = ${q(type)} LIMIT 1`,
-      ).catch(() => [] as Record<string, string | null>[]);
-      const storedName = String(stored[0]?.user_email ?? email);
-      const resp = await this.execStatement(
-        `DELETE FROM ${ROLES_TABLE} WHERE lower(user_email) = ${q(email)} AND coalesce(principal_type, 'user') = ${q(type)}`,
-      );
-      if (resp.status?.state !== 'SUCCEEDED') throw new Error(resp.status?.error?.message ?? 'Role delete failed');
-      const permissions = await this.syncRolePermissions(storedName, type, null);
-      return { ok: true, permissions };
+      const type: PrincipalKind = (qstr(req.query.principalType) || (req.body as { principalType?: string })?.principalType) === 'group' ? 'group' : 'user';
+      const raw = (qstr(req.query.userEmail) || (req.body as { userEmail?: string })?.userEmail || '').trim();
+      const name = type === 'group' ? raw : raw.toLowerCase();
+      if (!name) { res.status(400).json({ error: 'userEmail is required' }); return undefined; }
+      const changes = await this.setRoleMembership(name, type, null);
+      await this.execStatement(
+        `DELETE FROM ${ROLES_TABLE} WHERE lower(user_email) = ${q(name.toLowerCase())} AND coalesce(principal_type, 'user') = ${q(type)}`,
+      ).catch(() => undefined);
+      return { ok: true, changes };
+    });
+
+    // 13e2. Roles: grant each role group the resource permissions its role needs,
+    // with the signed-in admin's identity (admin only). Idempotent — run at first
+    // setup and again whenever the app's resources change.
+    post('roles-provision', '/roles/provision', async () => {
+      this.assertCatalog();
+      await this.requireRole('admin');
+      const ids = await this.roleGroupIds();
+      const results: { role: Role; group: string; found: boolean; permissions: Awaited<ReturnType<AiMapper['syncRolePermissions']>> }[] = [];
+      for (const r of ROLE_ORDER.slice().reverse()) {
+        if (!ids[r]) { results.push({ role: r, group: ROLE_GROUPS[r], found: false, permissions: [] }); continue; }
+        results.push({ role: r, group: ROLE_GROUPS[r], found: true, permissions: await this.syncRolePermissions(ROLE_GROUPS[r], 'group', r) });
+      }
+      return { results };
     });
 
     // 13f. Source systems: list (any role — drives the Mapper selector & filters).
     get('source-systems', '/source-systems', async () => {
       this.assertCatalog();
-      return { sourceSystems: await this.listSourceSystems(), defaultSourceSystem: DEFAULT_SOURCE_SYSTEM };
+      const details = await this.listSourceSystemDetails().catch(() => [] as { name: string; description: string | null; isDefault: boolean }[]);
+      return { sourceSystems: await this.listSourceSystems(), defaultSourceSystem: DEFAULT_SOURCE_SYSTEM, details };
     });
 
     // 13g. Source systems: create (admin only).
@@ -3157,6 +3406,68 @@ VALUES\n${rowSql.join(',\n')}`;
       return { ok: true, name: clean };
     });
 
+    // 13g-2. Source systems: edit name and/or description (admin only). The default
+    // FLAG is fixed, but the default's name is editable like any other. A rename is
+    // applied everywhere the name is stored: runs, examples, step logs, retrieval
+    // corpus, instructions, projects (incl. the default project's id/name), and the
+    // reference documents (files move to the new folder; their indexed passages are
+    // re-pointed, not re-parsed).
+    put('source-systems-update', '/source-systems', async (req, res) => {
+      this.assertCatalog();
+      await this.requireRole('admin');
+      await this.ensureSourceSystemsTable();
+      const body = (req.body ?? {}) as { name?: string; newName?: string; description?: string | null };
+      const oldName = (body.name ?? '').trim();
+      const newName = (body.newName ?? oldName).trim();
+      if (!oldName) { res.status(400).json({ error: 'name is required' }); return undefined; }
+      if (!newName || newName.length > 60 || !/^[\w .&/-]+$/.test(newName) || newName.includes('/')) {
+        res.status(400).json({ error: 'Source system name must be ≤60 chars (letters, numbers, spaces, . & - _).' });
+        return undefined;
+      }
+      const rows = await this.runQuery(`SELECT name, coalesce(is_default, false) AS is_default FROM ${SOURCE_SYSTEMS_TABLE} WHERE name = ${q(oldName)} LIMIT 1`);
+      if (!rows.length) { res.status(404).json({ error: `Source system '${oldName}' not found.` }); return undefined; }
+      const isDefault = String(rows[0].is_default).toLowerCase() === 'true';
+      const renamed = newName !== oldName;
+      if (renamed) {
+        const dup = await this.runQuery(`SELECT name FROM ${SOURCE_SYSTEMS_TABLE} WHERE lower(name) = ${q(newName.toLowerCase())} AND name <> ${q(oldName)} LIMIT 1`);
+        if (dup.length) { res.status(409).json({ error: `Source system '${dup[0].name}' already exists.` }); return undefined; }
+      }
+      const sets = [`name = ${q(newName)}`];
+      if (body.description !== undefined) sets.push(`description = ${q((body.description ?? '').trim() || null)}`);
+      await this.execStatement(`UPDATE ${SOURCE_SYSTEMS_TABLE} SET ${sets.join(', ')} WHERE name = ${q(oldName)}`);
+      const warnings: string[] = [];
+      if (renamed) {
+        const o = q(oldName);
+        const n = q(newName);
+        const oldPid = q(defaultProjectId(oldName));
+        const newPid = q(defaultProjectId(newName));
+        // Legacy rows with no source system belong to the default — pin them to the
+        // new name explicitly as part of renaming it.
+        const domainMatch = isDefault ? `(domain = ${o} OR domain IS NULL)` : `domain = ${o}`;
+        const step = async (label: string, sql: string) => {
+          try { await this.runLongStatement(sql); } catch (e) { warnings.push(`${label}: ${errMsg(e).slice(0, 200)}`); }
+        };
+        for (const [label, table] of [['runs', HISTORY_TABLE], ['examples', EXAMPLES_TABLE], ['retrieval corpus', CORPUS_TABLE], ['step log', STEP_LOG_TABLE]] as const) {
+          await step(label, `UPDATE ${table} SET domain = ${n}, project_id = CASE WHEN project_id = ${oldPid} THEN ${newPid} ELSE project_id END WHERE ${domainMatch} OR project_id = ${oldPid}`);
+        }
+        await step('instructions', `UPDATE ${SOURCE_SYSTEM_INSTRUCTIONS_TABLE} SET domain = ${n} WHERE domain = ${o}`);
+        await step('projects', `UPDATE ${PROJECTS_TABLE} SET source_system = ${n} WHERE source_system = ${o}`);
+        await step('default project',
+          `UPDATE ${PROJECTS_TABLE} SET project_id = ${newPid},
+             name = CASE WHEN name = ${q(`Default — ${oldName}`)} THEN ${q(`Default — ${newName}`)} ELSE name END
+           WHERE project_id = ${oldPid}`);
+        warnings.push(...(await this.moveReferenceDocs(oldName, newName)));
+        if (isDefault) DEFAULT_SOURCE_SYSTEM = newName;
+        if (VS_INDEX) {
+          try { await this.ctx().client.vectorSearchIndexes.syncIndex({ index_name: VS_INDEX }); } catch { /* hourly job catches up */ }
+        }
+      }
+      this.invalidateCache('sources:');
+      this.invalidateCache('projects:');
+      this.invalidateCache('refdocs:');
+      return { ok: true, name: newName, isDefault, warnings };
+    });
+
     // 13h. Source systems: delete (admin only; blocked when in use or for the default).
     del('source-systems-delete', '/source-systems', async (req, res) => {
       this.assertCatalog();
@@ -3164,8 +3475,9 @@ VALUES\n${rowSql.join(',\n')}`;
       await this.ensureSourceSystemsTable();
       const name = (qstr(req.query.name) || (req.body as { name?: string })?.name || '').trim();
       if (!name) { res.status(400).json({ error: 'name is required' }); return undefined; }
-      if (name.toLowerCase() === DEFAULT_SOURCE_SYSTEM.toLowerCase()) {
-        res.status(409).json({ error: `The default source system '${DEFAULT_SOURCE_SYSTEM}' cannot be deleted.` }); return undefined;
+      const flagged = await this.runQuery(`SELECT 1 FROM ${SOURCE_SYSTEMS_TABLE} WHERE name = ${q(name)} AND coalesce(is_default, false) LIMIT 1`).catch(() => []);
+      if (flagged.length || name.toLowerCase() === DEFAULT_SOURCE_SYSTEM.toLowerCase()) {
+        res.status(409).json({ error: `'${name}' is the default source system and cannot be deleted.` }); return undefined;
       }
       // Block deletion when any run, example, or project still references it.
       const [runs, examples, projects] = await Promise.all([
@@ -3379,6 +3691,31 @@ VALUES\n${rowSql.join(',\n')}`;
       );
       if (resp.status?.state !== 'SUCCEEDED') throw new Error(resp.status?.error?.message ?? 'Create failed');
       return { ok: true, vendorCode: cleanCode, name: cleanName };
+    });
+
+    // 13f-6b. Vendors: edit name and/or description (admin only). The code is the key
+    // projects reference, so it stays fixed.
+    put('vendors-update', '/vendors', async (req, res) => {
+      this.assertCatalog();
+      await this.requireRole('admin');
+      await this.ensureVendorsTable();
+      const { code, name, description } = (req.body ?? {}) as { code?: string; name?: string; description?: string | null };
+      const cleanCode = (code ?? '').trim();
+      const cleanName = (name ?? '').trim();
+      if (!cleanCode) { res.status(400).json({ error: 'code is required' }); return undefined; }
+      if (!cleanName) { res.status(400).json({ error: 'A vendor name is required.' }); return undefined; }
+      if (cleanName.length > 80) { res.status(400).json({ error: 'Vendor name must be ≤80 characters.' }); return undefined; }
+      const resp = await this.execStatement(
+        `UPDATE ${VENDORS_TABLE} SET name = :name, description = :description WHERE vendor_code = :vendor_code`,
+        [
+          { name: 'vendor_code', value: cleanCode },
+          { name: 'name', value: cleanName },
+          { name: 'description', value: (description ?? '').trim() || null },
+        ],
+      );
+      if (resp.status?.state !== 'SUCCEEDED') throw new Error(resp.status?.error?.message ?? 'Update failed');
+      this.invalidateCache('projects:'); // project list shows vendor names
+      return { ok: true };
     });
 
     // 13f-7. Vendors: delete (admin only; blocked while a project references it).
@@ -3732,17 +4069,18 @@ VALUES (:example_id, :target_table, :source_signature, :source_columns, :generat
       return { ok: true };
     });
 
-    // ---- Reference documents (Knowledge Assistant) ------------------------
+    // ---- Reference documents (Vector Search grounding) ---------------------
 
-    // 17. KA status — configured?, re-sync wired?, plus live sync state + last-synced.
+    // 17. Grounding status — index configured?, passage counts, re-index progress.
     get('reference-docs-status', '/reference-docs/status', async () => {
-      const sync = KA_ID.trim() ? await this.knowledgeSourceStatus() : { state: null, lastSyncedAt: null };
+      const configured = DOCS_INDEX.trim().length > 0;
+      const stats = configured ? await this.referenceIndexStats() : null;
       return {
-        configured: this.kaConfigured(),
-        canSync: KA_ID.trim().length > 0,
+        configured,
+        index: configured
+          ? { name: DOCS_INDEX, chunks: stats?.chunks ?? 0, files: stats?.files ?? 0, lastIndexedAt: stats?.lastIndexedAt ?? null, ...this.refIndex }
+          : null,
         volume: DOCS_VOLUME,
-        syncState: sync.state,        // 'UPDATING' | 'UPDATED' | null
-        lastSyncedAt: sync.lastSyncedAt,
       };
     });
 
@@ -3779,7 +4117,9 @@ VALUES (:example_id, :target_table, :source_signature, :source_columns, :generat
         return { files: [], error, needsReauth: !!scope };
       }
       files.sort((a, b) => a.name.localeCompare(b.name));
-      return { files };
+      // Chunk counts per file when Vector Search grounding is configured.
+      const perFile = DOCS_INDEX.trim() ? (await this.referenceIndexStats()).perFile : null;
+      return { files: perFile ? files.map((f) => ({ ...f, chunks: perFile[f.path] ?? 0 })) : files };
     });
 
     // 18b. Download a single reference file from a domain's folder. Streams the
@@ -3857,7 +4197,8 @@ VALUES (:example_id, :target_table, :source_signature, :source_columns, :generat
         const detail = await resp.text().catch(() => '');
         throw new Error(`Upload failed (${resp.status}): ${detail || resp.statusText}`);
       }
-      return { ok: true, name };
+      this.startReindex([filePath]); // parse + chunk in the background
+      return { ok: true, name, indexing: DOCS_INDEX.trim().length > 0 };
     });
 
     // 20. Delete a reference file from a domain's folder (editor+).
@@ -3869,41 +4210,24 @@ VALUES (:example_id, :target_table, :source_signature, :source_columns, :generat
         res.status(400).json({ error: 'a valid file name is required' }); return undefined;
       }
       const ctx = this.ctx();
-      await ctx.client.files.delete({ file_path: `${this.docsDir(qstr(req.query.sourceSystem))}/${name}` });
+      const deletedPath = `${this.docsDir(qstr(req.query.sourceSystem))}/${name}`;
+      await ctx.client.files.delete({ file_path: deletedPath });
+      this.startReindex([deletedPath]); // drop its chunks in the background
       return { ok: true };
     });
 
-    // 21. Trigger a Knowledge Assistant re-sync (editor+). Runs as the app service
-    // principal — so a permission error means the SP lacks access to the KA, which
-    // an admin fixes by granting it (NOT something the user can re-authorize away).
+    // 21. Re-index every reference document (editor+): reconciles the volume with the
+    // chunk table in the background (new/changed files parsed, removed files dropped).
     post('reference-docs-sync', '/reference-docs/sync', async (_req, res) => {
       await this.requireRole('editor');
-      if (!KA_ID.trim()) {
-        res.status(400).json({ error: 'Re-sync is not configured (AIMAPPER_KA_ID is not set).' });
+      if (!DOCS_INDEX.trim()) {
+        res.status(400).json({ error: 'Reference grounding is not configured (AIMAPPER_DOCS_INDEX is not set).' });
         return undefined;
       }
-      try {
-        await this.syncKnowledgeAssistant();
-      } catch (e) {
-        const msg = errMsg(e);
-        if (/permission_denied|do not have|forbidden/i.test(msg)) {
-          res.status(403).json({
-            error:
-              "The app's service principal does not have access to the Knowledge Assistant. " +
-              'An admin must grant it CAN_MANAGE on the assistant (Agent Bricks → the KA → Permissions), then retry. ' +
-              'This is not something re-signing-in can fix.',
-          });
-          return undefined;
-        }
-        throw e;
-      }
-      return { ok: true };
+      this.startReindex();
+      return { ok: true, indexing: true };
     });
 
-    // 22. Knowledge Assistant details for the Admin page (admin only). Returns
-    // the configured env + the raw KA resource (status, endpoint, sources) so the
-    // UI can render whatever the API exposes. Best-effort: `details` is null if
-    // the KA is unreachable or not configured.
     // ── 23. Genie Agent (Ask Genie panel) ──────────────────────────────
     // Returns the space id so the client knows whether to show the panel.
     get('genie-config', '/genie-config', async () => {
@@ -4006,26 +4330,6 @@ VALUES (:example_id, :target_table, :source_signature, :source_columns, :generat
       return { columns: cols, rows };
     });
 
-    // ── 24. Knowledge Assistant details (admin) ─────────────────────────
-    get('ka-details', '/ka-details', async () => {
-      await this.requireRole('admin');
-      const [details, sync] = await Promise.all([
-        this.getKnowledgeAssistantDetails(),
-        KA_ID.trim() ? this.knowledgeSourceStatus() : Promise.resolve({ state: null, lastSyncedAt: null }),
-      ]);
-      return {
-        configured: this.kaConfigured(),
-        canSync: KA_ID.trim().length > 0,
-        endpoint: KA_ENDPOINT || null,
-        kaId: KA_ID || null,
-        volume: DOCS_VOLUME,
-        // Aggregate knowledge-source sync state (UPDATING while a re-sync runs,
-        // UPDATED when settled) + the newest indexed-data freshness timestamp.
-        syncState: sync.state,
-        lastSyncedAt: sync.lastSyncedAt,
-        details,
-      };
-    });
   }
 }
 
@@ -4041,41 +4345,6 @@ function missingScope(msg: string): string | null {
   return m ? m[1] : null;
 }
 
-/**
- * Extract assistant text from a Responses-API reply (what a Knowledge Assistant
- * endpoint returns). Handles the common shapes defensively:
- *   { output: [{ content: [{ type:'output_text', text }] }] }
- *   { output_text: "..." }            (convenience field some models emit)
- *   { choices: [{ message: { content } }] }  (chat fallback, just in case)
- */
-function extractResponsesText(resp: unknown): string {
-  const r = (resp ?? {}) as Record<string, unknown>;
-  if (typeof r.output_text === 'string') return r.output_text;
-
-  const output = r.output;
-  if (Array.isArray(output)) {
-    const parts: string[] = [];
-    for (const item of output) {
-      const content = (item as Record<string, unknown>)?.content;
-      if (typeof content === 'string') { parts.push(content); continue; }
-      if (Array.isArray(content)) {
-        for (const c of content) {
-          const t = (c as Record<string, unknown>)?.text;
-          if (typeof t === 'string') parts.push(t);
-        }
-      }
-    }
-    if (parts.length) return parts.join('\n').trim();
-  }
-
-  // Chat-completions fallback.
-  const choices = r.choices;
-  if (Array.isArray(choices)) {
-    const c = (choices[0] as Record<string, unknown>)?.message as Record<string, unknown> | undefined;
-    if (typeof c?.content === 'string') return c.content;
-  }
-  return '';
-}
 
 /** Read a query-string param as a plain string (ignores arrays/objects). */
 function qstr(v: unknown): string {

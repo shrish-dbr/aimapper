@@ -19,18 +19,21 @@ env:
   # Set to your own admin email(s) before deploying.
   - name: AIMAPPER_ADMINS
     value: "shrish.chaturvedi@databricks.com"
-  # Knowledge Assistant (Agent Bricks) for grounding mappings on reference PDFs.
-  # OPTIONAL — leave empty to disable doc grounding (app works exactly as before).
-  # Populate from `setup/create_ka.sh` output:
-  #   AIMAPPER_KA_ENDPOINT = the KA's query serving-endpoint name (grounds prompts)
-  #   AIMAPPER_KA_ID        = the KA id (enables the in-app "Re-sync" button)
-  - name: AIMAPPER_KA_ENDPOINT
-    value: "ka-e4c2dc3f-endpoint"
-  - name: AIMAPPER_KA_ID
-    value: "e4c2dc3f-a95a-4bb5-8e6b-ea6f44c0f2a6"
+  # Account groups that define the roles (setup/08_role_groups.py creates them).
+  - name: AIMAPPER_ADMIN_GROUP
+    value: "aimapper-admins"
+  - name: AIMAPPER_EDITOR_GROUP
+    value: "aimapper-editors"
+  - name: AIMAPPER_VIEWER_GROUP
+    value: "aimapper-viewers"
   # Vector Search for semantic few-shot retrieval over approved examples + history.
   # OPTIONAL — leave empty to use the built-in lexical retrieval (recency + column
   # overlap). Populate from `setup/create_vector_index.sh` output.
+  # Reference-document grounding: Vector Search index over passages parsed from the
+  # reference PDFs. OPTIONAL — leave empty to disable doc grounding. From
+  # setup/create_reference_index.sh.
+  - name: AIMAPPER_DOCS_INDEX
+    value: "serverless_stable_12edvn_catalog.aimapper.aimapper_reference_index"
   - name: AIMAPPER_VS_ENDPOINT
     value: "aimapper-retrieval"
   - name: AIMAPPER_VS_INDEX

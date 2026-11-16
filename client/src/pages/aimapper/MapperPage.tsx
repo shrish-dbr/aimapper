@@ -23,7 +23,7 @@ import {
   Slider,
 } from '@databricks/appkit-ui/react';
 import { Wand2, Search, Sparkles, CheckCircle2, Save, Star, Download, TableProperties, FileSpreadsheet, FileText, ChevronDown, GitBranch, History, Layers, ThumbsUp, ThumbsDown, Copy, Check, Wrench } from 'lucide-react';
-import { api, LARGE_SELECTION_WARN, type AttributeMapping, type TargetEntity, type SourceTable, type RunItem, type ValidationReport, type Project } from '../../lib/aimapperApi';
+import { api, LARGE_SELECTION_WARN, type AttributeMapping, type TargetEntity, type SourceTable, type RunItem, type ValidationReport, type Project, type ReferenceSource } from '../../lib/aimapperApi';
 import { setGenieSession } from '../../lib/genieSession';
 import { useRole } from '../../lib/roleContext';
 import { SearchableSelect } from './SearchableSelect';
@@ -58,6 +58,7 @@ interface BulkResult {
   mappings?: AttributeMapping[];
   examplesUsed?: number;
   referenceUsed?: boolean;
+  referenceSources?: ReferenceSource[];
   retrievalMethod?: 'vector_search' | 'lexical';
   selectedEndpoint?: string;
   totalTokens?: number;
@@ -91,6 +92,8 @@ interface SqlRow {
   validated: boolean;
   examplesUsed: number;
   referenceUsed: boolean;
+  /** Passages that grounded this mapping (Vector Search mode). */
+  referenceSources?: ReferenceSource[];
   savedExample: boolean;
   /** True once this mapping has been saved to History — disables re-saving (and
    * Save as Example) so the same validated result isn't submitted twice. Cleared
@@ -678,7 +681,7 @@ export function MapperPage() {
             target: t.target_table, status: status as BulkResult['status'], mapped: mappedN, total: m.length,
             error: status === 'FAILED' ? error ?? undefined : undefined,
             sql: gen.sql, item, mappings: m,
-            examplesUsed: gen.examplesUsed, referenceUsed: gen.referenceUsed ?? false, retrievalMethod: gen.retrievalMethod, selectedEndpoint: gen.selectedEndpoint,
+            examplesUsed: gen.examplesUsed, referenceUsed: gen.referenceUsed ?? false, referenceSources: gen.referenceSources, retrievalMethod: gen.retrievalMethod, selectedEndpoint: gen.selectedEndpoint,
             totalTokens: taskTok.total, promptTokens: taskTok.prompt, completionTokens: taskTok.completion,
           };
         } catch (err) {
@@ -1080,6 +1083,7 @@ export function MapperPage() {
         validated: true,
         examplesUsed: gen.examplesUsed,
         referenceUsed: gen.referenceUsed ?? false,
+        referenceSources: gen.referenceSources,
         savedExample: false,
         preview: null,
         previewError: null,
@@ -1706,7 +1710,10 @@ export function MapperPage() {
             {row.selectedEndpoint && (
               <MetaChip title="Model auto-selected by task size">{row.selectedEndpoint} · auto-selected</MetaChip>
             )}
-            {row.referenceUsed && <MetaChip>Grounded in reference documents for {targetEntity}</MetaChip>}
+            {row.referenceUsed && (() => {
+              const g = groundingChip(row.referenceSources, `Grounded in reference documents for ${targetEntity}`);
+              return <MetaChip title={g.title}>{g.text}</MetaChip>;
+            })()}
             {row.promptTrimmed && <MetaChip title="Prompt was large — trimmed data samples/examples to fit the model context.">Prompt trimmed to fit context</MetaChip>}
             {!!row.examplesTruncated && row.examplesTruncated > 0 && (
               <MetaChip tone="warning">
@@ -1889,6 +1896,17 @@ function ProjectField({ label, value, muted }: { label: string; value: string; m
 }
 
 /** Small rounded meta chip (retrieval, endpoint, tokens …). */
+/** "Grounded in 6 passages · Epic_PATIENT.pdf, Epic_COVERAGE…" with a per-passage tooltip. */
+function groundingChip(sources: ReferenceSource[] | undefined, fallback: string): { text: string; title?: string } {
+  if (!sources || sources.length === 0) return { text: fallback };
+  const files = [...new Set(sources.map((s) => s.file))];
+  const shown = files.slice(0, 2).join(', ') + (files.length > 2 ? ` +${files.length - 2}` : '');
+  const title = sources
+    .map((s) => `${s.file}${s.pages ? ` p.${s.pages}` : ''}${s.heading ? ` · ${s.heading}` : ''} (score ${s.score})`)
+    .join('\n');
+  return { text: `Grounded in ${sources.length} passage${sources.length === 1 ? '' : 's'} · ${shown}`, title };
+}
+
 function MetaChip({ children, title, tone }: { children: ReactNode; title?: string; tone?: 'warning' }) {
   return (
     <span
@@ -2025,7 +2043,10 @@ function BulkResultRow({
             {r.selectedEndpoint && (
               <MetaChip title="Model auto-selected by task size">{r.selectedEndpoint} · auto-selected</MetaChip>
             )}
-            {r.referenceUsed && <MetaChip>Grounded in reference documents</MetaChip>}
+            {r.referenceUsed && (() => {
+              const g = groundingChip(r.referenceSources, 'Grounded in reference documents');
+              return <MetaChip title={g.title}>{g.text}</MetaChip>;
+            })()}
             {r.totalTokens != null && r.totalTokens > 0 && (
               <MetaChip>{r.totalTokens.toLocaleString()} tokens this task{r.promptTokens ? ` · ${r.promptTokens.toLocaleString()} in / ${(r.completionTokens ?? 0).toLocaleString()} out` : ''}</MetaChip>
             )}

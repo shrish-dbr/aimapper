@@ -17,8 +17,6 @@ const IDS: ResourceIds = {
   appName: 'aimapper',
   warehouseId: 'wh1',
   genieSpaceId: 'g1',
-  kaEndpointId: 'ep1',
-  kaId: 'ka1',
   vsEndpointId: 'vs1',
 };
 
@@ -33,7 +31,6 @@ describe('planGrants', () => {
       apps: 'CAN_USE',
       warehouses: 'CAN_USE',
       genie: 'CAN_RUN',
-      'serving-endpoints': 'CAN_QUERY',
       'vector-search-endpoints': 'CAN_USE',
     });
     expect(uc('viewer')).toContain('SCHEMA cat.aimapper SELECT');
@@ -48,14 +45,13 @@ describe('planGrants', () => {
     expect(uc('editor')).toContain('VOLUME cat.aimapper.reference_docs WRITE VOLUME');
   });
 
-  it('gives admins manage-level access everywhere, including the KA itself', () => {
+  it('gives admins manage-level access everywhere', () => {
     expect(Object.values(acl('admin')).every((l) => l === 'CAN_MANAGE')).toBe(true);
-    expect(acl('admin')['knowledge-assistants']).toBe('CAN_MANAGE');
     expect(uc('admin')).toEqual(['CATALOG cat USE CATALOG', 'SCHEMA cat.aimapper ALL PRIVILEGES', 'SCHEMA cat.aimapper MANAGE']);
   });
 
   it('skips resources that are not configured', () => {
-    const plan = planGrants('viewer', { ...IDS, genieSpaceId: null, kaEndpointId: null, vsEndpointId: null });
+    const plan = planGrants('viewer', { ...IDS, genieSpaceId: null, vsEndpointId: null });
     const types = plan.filter((g) => g.kind === 'acl').map((g) => (g.kind === 'acl' ? g.objectType : ''));
     expect(types).toEqual(['apps', 'warehouses']);
   });

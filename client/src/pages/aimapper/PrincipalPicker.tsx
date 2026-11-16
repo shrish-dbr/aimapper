@@ -124,14 +124,14 @@ export function PrincipalPicker({
                 {groups.map((g) => {
                   const selected = value?.type === 'group' && value.name.toLowerCase() === g.displayName.toLowerCase();
                   return (
-                    <CommandItem key={`g:${g.displayName}`} value={`group ${g.displayName}`} onSelect={() => pick({ name: g.displayName, type: 'group' })}>
+                    <CommandItem key={`g:${g.displayName}`} value={`group ${g.displayName}`} disabled={g.workspaceLocal} onSelect={() => pick({ name: g.displayName, type: 'group' })}>
                       <Check className={cn('mr-2 h-4 w-4 shrink-0 text-brand', selected ? 'opacity-100' : 'opacity-0')} />
                       <Users className="mr-2 h-4 w-4 shrink-0 text-muted-foreground" />
                       <span className="truncate">{g.displayName}</span>
                       {g.workspaceLocal && (
                         <span
                           className="ml-auto shrink-0 rounded-md bg-muted px-1.5 py-0.5 text-[0.6875rem] font-semibold text-muted-foreground"
-                          title="Workspace-local group: gets app/Genie/endpoint access, but Unity Catalog grants need an account-level group."
+                          title="Workspace-local group: can't be added to a role group (role groups are account groups). Use an account group."
                         >
                           Workspace group
                         </span>

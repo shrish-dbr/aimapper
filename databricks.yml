@@ -28,13 +28,13 @@ resources:
         - catalog.schemas
         - catalog.tables
         # `files` lets the References page read/write reference PDFs in the
-        # reference_docs UC volume on-behalf-of the user (Knowledge Assistant).
+        # reference_docs UC volume on-behalf-of the user.
         - files
         # `dashboards.genie` lets the Ask Genie assistant start/poll Genie
         # conversations on-behalf-of the signed-in user (AIMAPPER_GENIE_SPACE_ID).
         - dashboards.genie
         # Role assignment grants resource permissions AS THE SIGNED-IN ADMIN (Admin →
-        # Roles): app, Genie space, KA endpoint, warehouse and Vector Search endpoint
+        # Roles): app, Genie space, warehouse and Vector Search endpoint
         # permissions go through the Permissions API; UC grants through `sql`.
         - apps
         - vector-search

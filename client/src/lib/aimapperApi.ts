@@ -168,13 +168,28 @@ export interface SchemaVersion {
 }
 
 export type PrincipalType = 'user' | 'group';
-export interface RoleAssignment {
-  /** User email, or group display name when principal_type is 'group'. */
-  user_email: string;
-  role: string;
-  updated_by: string | null;
-  updated_at: string | null;
-  principal_type?: PrincipalType | null;
+/** One of the three account groups that carry each role's permissions. */
+export interface RoleGroup {
+  role: Role;
+  name: string;
+  /** null = the group doesn't exist (run setup/08_role_groups.sh). */
+  id: string | null;
+  members: number;
+  /** Permissions the app has granted this group (0 = not applied yet). */
+  grantsApplied: number;
+  lastAppliedAt: string | null;
+}
+/** A member of a role group, at the highest role group they're in. */
+export interface RoleMember {
+  /** User email, or group / service principal display name. */
+  principal: string;
+  principalType: PrincipalType | 'service_principal';
+  displayName: string;
+  role: Role;
+  /** Lower role groups the principal is also (redundantly) in. */
+  alsoIn: Role[];
+  updatedBy: string | null;
+  updatedAt: string | null;
 }
 /** Outcome of granting/revoking one resource permission during a role change. */
 export interface PermissionResult {
@@ -261,32 +276,42 @@ export interface MappingExample {
   source_system?: string | null;
   project_id?: string | null;
 }
-/** A reference PDF stored in the Knowledge Assistant volume. */
+/** A reference PDF stored in the reference_docs volume. */
 export interface ReferenceDoc {
   name: string;
   path: string;
   size: number | null;
   modified: number | null;
+  /** Indexed chunks for this file (present when Vector Search grounding is configured). */
+  chunks?: number;
+}
+/** One retrieved passage that grounded a mapping. */
+export interface ReferenceSource {
+  file: string;
+  pages: string;
+  heading: string | null;
+  score: number;
+  chars: number;
+}
+/** Vector Search reference index state (chunks of the reference PDFs). */
+export interface ReferenceIndexStatus {
+  name: string;
+  chunks: number;
+  files: number;
+  lastIndexedAt: string | null;
+  running: boolean;
+  startedAt: string | null;
+  finishedAt: string | null;
+  lastError: string | null;
+  filesParsed: number;
+  filesRemoved: number;
 }
 export interface ReferenceDocsStatus {
+  /** True when the Vector Search reference index is configured (AIMAPPER_DOCS_INDEX). */
   configured: boolean;
-  canSync: boolean;
   volume: string;
-  syncState?: string | null;      // 'UPDATING' | 'UPDATED' | null
-  lastSyncedAt?: string | null;
-}
-/** KA details for the Admin page. `details` is the raw KA resource (shape varies). */
-export interface KaDetails {
-  configured: boolean;
-  canSync: boolean;
-  endpoint: string | null;
-  kaId: string | null;
-  volume: string;
-  /** Aggregate knowledge-source sync state: 'UPDATING' | 'UPDATED' | null. */
-  syncState: string | null;
-  /** Newest indexed-data freshness timestamp across sources, or null. */
-  lastSyncedAt: string | null;
-  details: Record<string, unknown> | null;
+  /** Vector Search chunk index (null when AIMAPPER_DOCS_INDEX is unset). */
+  index?: ReferenceIndexStatus | null;
 }
 
 /** Per-user personalization, stored server-side (aimapper_user_prefs). */
@@ -380,7 +405,7 @@ export const api = {
     // sampleData/sampleValues: [DATA-SAMPLING] per-run toggle + sample size (example values per column).
     opts?: { projectId?: string; crossProject?: boolean; userInstructions?: string; priorSql?: string; sampleData?: boolean; sampleValues?: number },
   ) => {
-    const res = await sendJson<{ sql: string; readOnly: boolean; examplesUsed: number; examplesTruncated?: number; referenceUsed?: boolean; promptTrimmed?: boolean; retrievalMethod?: 'vector_search' | 'lexical'; crossProject?: boolean; tokens?: TokenUsage; outputTruncated?: boolean; message?: string; selectedEndpoint?: string; traceId?: string }>('POST', `${BASE}/generate-join-sql`, {
+    const res = await sendJson<{ sql: string; readOnly: boolean; examplesUsed: number; examplesTruncated?: number; referenceUsed?: boolean; referenceSources?: ReferenceSource[]; promptTrimmed?: boolean; retrievalMethod?: 'vector_search' | 'lexical'; crossProject?: boolean; tokens?: TokenUsage; outputTruncated?: boolean; message?: string; selectedEndpoint?: string; traceId?: string }>('POST', `${BASE}/generate-join-sql`, {
       endpoint,
       target,
       sources,
@@ -424,7 +449,10 @@ export const api = {
       `${BASE}/genie-query-result?conversationId=${encodeURIComponent(conversationId)}&messageId=${encodeURIComponent(messageId)}&attachmentId=${encodeURIComponent(attachmentId)}`, // reconstructed (line cut off at right edge)
     ),
   // — Source systems ————————————————————————————————————
-  sourceSystems: () => getJson<{ sourceSystems: string[]; defaultSourceSystem: string }>(`${BASE}/source-systems`),
+  sourceSystems: () =>
+    getJson<{ sourceSystems: string[]; defaultSourceSystem: string; details?: { name: string; description: string | null; isDefault: boolean }[] }>(`${BASE}/source-systems`),
+  updateSourceSystem: (name: string, newName: string, description: string | null) =>
+    sendJson<{ ok: boolean; name: string; isDefault: boolean; warnings: string[] }>('PUT', `${BASE}/source-systems`, { name, newName, description }, { kind: 'long', label: 'Updating source system' }),
   createSourceSystem: (name: string, description?: string) =>
     sendJson<{ ok: boolean; name: string }>('POST', `${BASE}/source-systems`, { name, description }),
   deleteSourceSystem: (name: string) =>
@@ -445,17 +473,21 @@ export const api = {
   vendors: () => getJson<{ vendors: Vendor[] }>(`${BASE}/vendors`),
   createVendor: (name: string, code: string, description?: string) =>
     sendJson<{ ok: boolean; vendorCode: string; name: string }>('POST', `${BASE}/vendors`, { name, code, description }),
+  updateVendor: (code: string, name: string, description: string | null) =>
+    sendJson<{ ok: boolean }>('PUT', `${BASE}/vendors`, { code, name, description }),
   deleteVendor: (code: string) =>
     sendJson<{ ok: boolean }>('DELETE', `${BASE}/vendors?code=${encodeURIComponent(code)}`, {}),
   whoami: () => getJson<{ email: string; role: Role }>(`${BASE}/whoami`),
   approvalTransition: (itemId: string, action: ApprovalAction, note?: string) =>
     sendJson<{ ok: boolean; from: string; to: string }>('POST', `${BASE}/approval-transition`, { itemId, action, note }),
-  roles: () => getJson<{ roles: RoleAssignment[]; bootstrapAdmins: string[] }>(`${BASE}/roles`),
+  roles: () => getJson<{ groups: RoleGroup[]; members: RoleMember[]; bootstrapAdmins: string[]; error: string | null }>(`${BASE}/roles`),
   principals: () => getJson<WorkspacePrincipals>(`${BASE}/principals`),
   setRole: (userEmail: string, role: Role, principalType: PrincipalType = 'user') =>
-    sendJson<{ ok: boolean; permissions?: PermissionResult[] }>('POST', `${BASE}/roles`, { userEmail, role, principalType }, { kind: 'long', label: 'Assigning role & permissions' }),
+    sendJson<{ ok: boolean; group: string; changes: string[] }>('POST', `${BASE}/roles`, { userEmail, role, principalType }, { kind: 'long', label: 'Updating role group membership' }),
   deleteRole: (userEmail: string, principalType: PrincipalType = 'user') =>
-    sendJson<{ ok: boolean; permissions?: PermissionResult[] }>('DELETE', `${BASE}/roles?userEmail=${encodeURIComponent(userEmail)}&principalType=${principalType}`, {}, { kind: 'long', label: 'Removing role & permissions' }),
+    sendJson<{ ok: boolean; changes: string[] }>('DELETE', `${BASE}/roles?userEmail=${encodeURIComponent(userEmail)}&principalType=${principalType}`, {}, { kind: 'long', label: 'Removing from role groups' }),
+  provisionRoleGroups: () =>
+    sendJson<{ results: { role: Role; group: string; found: boolean; permissions: PermissionResult[] }[] }>('POST', `${BASE}/roles/provision`, {}, { kind: 'long', label: 'Applying role group permissions' }),
   history: (status: string, approval?: string, sourceSystem?: string, projectId?: string) =>
     getJson<{ rows: HistoryRow[] }>(
       `${BASE}/history?status=${encodeURIComponent(status)}${approval ? `&approval=${encodeURIComponent(approval)}` : ''}${sourceSystem ? `&sourceSystem=${encodeURIComponent(sourceSystem)}` : ''}${projectId ? `&projectId=${encodeURIComponent(projectId)}` : ''}`,
@@ -491,7 +523,7 @@ export const api = {
   deleteExample: (exampleId: string) =>
     sendJson<{ ok: boolean }>('DELETE', `${BASE}/examples?exampleId=${encodeURIComponent(exampleId)}`, {}),
 
-  // ---- Reference documents (Knowledge Assistant) ----
+  // ---- Reference documents (Vector Search grounding) ----
   referenceDocs: {
     status: () => getJson<ReferenceDocsStatus>(`${BASE}/reference-docs/status`),
     list: (sourceSystem?: string) =>
@@ -508,7 +540,7 @@ export const api = {
           headers: { 'Content-Type': 'application/octet-stream' },
           body: file,
         });
-        const body = (await res.json()) as { ok?: boolean; name?: string; error?: string };
+        const body = (await res.json()) as { ok?: boolean; name?: string; error?: string; indexing?: boolean };
         if (!res.ok || body.error) throw new Error(body.error ?? `Upload failed: ${res.status}`);
         return body;
       }),
@@ -535,9 +567,8 @@ export const api = {
         a.remove();
         URL.revokeObjectURL(url);
       }),
-    sync: () => sendJson<{ ok: boolean }>('POST', `${BASE}/reference-docs/sync`, {}, { kind: 'long', label: 'Re-syncing reference documents' }),
+    sync: () => sendJson<{ ok: boolean }>('POST', `${BASE}/reference-docs/sync`, {}, { kind: 'long', label: 'Re-indexing reference documents' }),
   },
-  kaDetails: () => getJson<KaDetails>(`${BASE}/ka-details`),
   getUserPrefs: () => getJson<{ prefs: UserPrefs }>(`${BASE}/user-prefs`),
   saveUserPrefs: (prefs: UserPrefs) => sendJson<{ ok: boolean }>('POST', `${BASE}/user-prefs`, prefs),
   retrievalStatus: () =>

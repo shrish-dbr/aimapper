@@ -73,3 +73,16 @@ try:
     print("sync triggered for", index_name)
 except Exception as e:
     print("sync note:", e)
+
+# COMMAND ----------
+# Reference-document grounding index (Vector Search passages of the reference PDFs).
+# The app re-indexes chunks on upload/delete/re-sync; this sync is the safety net for
+# a sync the app couldn't start (e.g. the index was mid-sync). Optional widget.
+dbutils.widgets.text("reference_index_name", "")
+reference_index_name = dbutils.widgets.get("reference_index_name")
+if reference_index_name:
+    try:
+        WorkspaceClient().vector_search_indexes.sync_index(index_name=reference_index_name)
+        print("sync triggered for", reference_index_name)
+    except Exception as e:
+        print("reference sync note:", e)

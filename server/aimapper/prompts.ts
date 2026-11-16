@@ -126,8 +126,8 @@ function renderSampleContext(sampleContext?: string): string {
   );
 }
 
-/** Render a reference-documentation grounding block (from the Knowledge
- * Assistant over uploaded source-metadata PDFs), or '' if none. */
+/** Render a reference-documentation grounding block (Vector Search chunks of the
+ * uploaded source-metadata PDFs, retrieved via Vector Search), or '' if none. */
 function renderReferenceContext(referenceContext?: string): string {
   const ctx = (referenceContext ?? '').trim();
   if (!ctx) return '';
@@ -137,7 +137,9 @@ function renderReferenceContext(referenceContext?: string): string {
     'transformation rules). Treat them as authoritative context for this source ' +
     'system and honor them where relevant. Explicit column-level mappings stated here ' +
     'are authoritative, and one source column may legitimately feed several target ' +
-    'columns — do not treat such a repeat as a contradiction:\n' +
+    'columns — do not treat such a repeat as a contradiction. Passages may be verbatim ' +
+    'excerpts labelled [file p.N · section]; tables appear as "a | b" rows, and an excerpt ' +
+    'can include rows unrelated to this target — use only what applies:\n' +
     ctx
   );
 }
@@ -180,9 +182,9 @@ export interface PromptLimits {
 export type PromptProfile = 'conservative' | 'balanced' | 'generous';
 export const DEFAULT_PROMPT_PROFILE: PromptProfile = 'balanced';
 export const PROMPT_PROFILES: Record<PromptProfile, PromptLimits> = {
-  conservative: { genMaxTokens: 8000,  identifyMaxTokens: 4000,  maxPromptChars: 300000, maxExampleSqlChars: 50000,  fewshotCharBudget: 100000, maxFewshotItems: 10, maxReferenceContextChars: 2000, maxPerRunInstructionChars: 2000, maxReferenceQueryColumns: 20, sampleCharBudget: 20000, maxSampleValues: 50,  maxValueChars: 60  },
-  balanced:     { genMaxTokens: 16000, identifyMaxTokens: 8000,  maxPromptChars: 600000, maxExampleSqlChars: 200000, fewshotCharBudget: 200000, maxFewshotItems: 20, maxReferenceContextChars: 4000, maxPerRunInstructionChars: 4000, maxReferenceQueryColumns: 40, sampleCharBudget: 40000, maxSampleValues: 100, maxValueChars: 60  },
-  generous:     { genMaxTokens: 32000, identifyMaxTokens: 16000, maxPromptChars: 900000, maxExampleSqlChars: 400000, fewshotCharBudget: 400000, maxFewshotItems: 30, maxReferenceContextChars: 8000, maxPerRunInstructionChars: 8000, maxReferenceQueryColumns: 80, sampleCharBudget: 80000, maxSampleValues: 200, maxValueChars: 120 },
+  conservative: { genMaxTokens: 8000,  identifyMaxTokens: 4000,  maxPromptChars: 300000, maxExampleSqlChars: 50000,  fewshotCharBudget: 100000, maxFewshotItems: 10, maxReferenceContextChars: 10000, maxPerRunInstructionChars: 2000, maxReferenceQueryColumns: 20, sampleCharBudget: 20000, maxSampleValues: 50,  maxValueChars: 60  },
+  balanced:     { genMaxTokens: 16000, identifyMaxTokens: 8000,  maxPromptChars: 600000, maxExampleSqlChars: 200000, fewshotCharBudget: 200000, maxFewshotItems: 20, maxReferenceContextChars: 20000, maxPerRunInstructionChars: 4000, maxReferenceQueryColumns: 40, sampleCharBudget: 40000, maxSampleValues: 100, maxValueChars: 60  },
+  generous:     { genMaxTokens: 32000, identifyMaxTokens: 16000, maxPromptChars: 900000, maxExampleSqlChars: 400000, fewshotCharBudget: 400000, maxFewshotItems: 30, maxReferenceContextChars: 30000, maxPerRunInstructionChars: 8000, maxReferenceQueryColumns: 80, sampleCharBudget: 80000, maxSampleValues: 200, maxValueChars: 120 },
 };
 /** Resolve a profile name to its limits; unknown/empty → the default profile. */
 export function resolvePromptProfile(name?: string | null): PromptLimits {
