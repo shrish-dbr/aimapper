@@ -1,0 +1,42 @@
+command: ['npm', 'run', 'start']
+env:
+  - name: DATABRICKS_WAREHOUSE_ID
+    valueFrom: sql-warehouse
+  - name: DATABRICKS_SERVING_ENDPOINT_NAME
+    valueFrom: serving-endpoint
+  # Unity Catalog catalog/schema holding the app's tables (target_schema,
+  # aimapper_conversion_runs, mapping_examples, aimapper_config).
+  # app.yaml does not support ${var.*} substitution, so set these to YOUR values
+  # before deploying. The plugin reads them via env at runtime; the catalog can
+  # also be changed later in-app on the Config page (per-user, stored in a table).
+  - name: AIMAPPER_CATALOG
+    value: serverless_stable_12edvn_catalog
+  - name: AIMAPPER_SCHEMA
+    value: aimapper
+  # Comma-separated emails that are ALWAYS admins (bootstrap for the approval
+  # workflow). These can manage everyone else's role in-app (Admin tab). All
+  # other signed-in users default to 'viewer' until an admin promotes them.
+  # Set to your own admin email(s) before deploying.
+  - name: AIMAPPER_ADMINS
+    value: "shrish.chaturvedi@databricks.com"
+  # Knowledge Assistant (Agent Bricks) for grounding mappings on reference PDFs.
+  # OPTIONAL — leave empty to disable doc grounding (app works exactly as before).
+  # Populate from `setup/create_ka.sh` output:
+  #   AIMAPPER_KA_ENDPOINT = the KA's query serving-endpoint name (grounds prompts)
+  #   AIMAPPER_KA_ID        = the KA id (enables the in-app "Re-sync" button)
+  - name: AIMAPPER_KA_ENDPOINT
+    value: "ka-e4c2dc3f-endpoint"
+  - name: AIMAPPER_KA_ID
+    value: "e4c2dc3f-a95a-4bb5-8e6b-ea6f44c0f2a6"
+  # Vector Search for semantic few-shot retrieval over approved examples + history.
+  # OPTIONAL — leave empty to use the built-in lexical retrieval (recency + column
+  # overlap). Populate from `setup/create_vector_index.sh` output.
+  - name: AIMAPPER_VS_ENDPOINT
+    value: "aimapper-retrieval"
+  - name: AIMAPPER_VS_INDEX
+    value: "serverless_stable_12edvn_catalog.aimapper.aimapper_retrieval_index"
+  # Genie Agent space ID for the "Ask Genie" panel on the Mapper page.
+  # OPTIONAL — leave empty to hide the panel. Create a Genie Agent over the
+  # aimapper tables and paste the space ID here.
+  - name: AIMAPPER_GENIE_SPACE_ID
+    value: "01f1e17575301772bec1d39f6875493c"

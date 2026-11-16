@@ -1,0 +1,287 @@
+@import "@databricks/appkit-ui/styles.css";
+
+/* `dark:` utilities follow the user's Appearance choice (the `.dark` class on <html>),
+   not the OS setting — matching how the theme tokens below are scoped. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   AI Mapper — "mapping studio" design system
+   Warm off-white canvas, white cards with hairline borders, a deep slate "ink"
+   (sidebar, hero cards, code, secondary-dark buttons) and a single signal red
+   accent (primary actions, active nav, progress). Identifiers render in mono.
+
+   Token layering: AppKit's styles.css defines :root + a prefers-color-scheme
+   dark block. `:root:root` (0,2,0) wins over both; `:root:root.dark` (0,3,0) is
+   the real dark theme, toggled by the user's Appearance preference (Settings).
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+:root:root {
+  /* brand */
+  --ink: #1b2e36;               /* sidebar / hero / code surfaces */
+  --ink-2: #263d47;             /* raised element on ink (active nav, user card) */
+  --ink-foreground: #f3f1ec;
+  --ink-muted: #9fb0b6;
+  --brand: #e5402b;             /* signal red */
+  --brand-strong: #c9311f;      /* button fill (AA on white text) */
+  --brand-soft: #fdecea;
+  --brand-soft-foreground: #b3291a;
+
+  /* status (soft fill + strong text) */
+  --success: #17794f;
+  --success-foreground: #ffffff;
+  --success-soft: #e3f3ea;
+  --success-soft-foreground: #17794f;
+  --warning: #e3a03a;
+  --warning-foreground: #3b2a07;
+  --warning-soft: #fcf0da;
+  --warning-soft-foreground: #94590a;
+  --danger-soft: #fdecea;
+  --danger-soft-foreground: #b3291a;
+
+  /* surfaces */
+  --background: #f5f4f0;
+  --foreground: #1b2b32;
+  --card: #ffffff;
+  --card-foreground: #1b2b32;
+  --popover: #ffffff;
+  --popover-foreground: #1b2b32;
+  --surface-sunken: #f1efea;    /* in-card tiles, code gutters, read-only fields */
+
+  --primary: var(--brand-strong);
+  --primary-foreground: #ffffff;
+  --secondary: #efede8;
+  --secondary-foreground: #1b2b32;
+  --muted: #f1efea;
+  --muted-foreground: #5e6b70;
+  --accent: #f1efea;
+  --accent-foreground: #1b2b32;
+  --destructive: #c9311f;
+  --destructive-foreground: #ffffff;
+  --border: #e6e2db;
+  --input: #dcd8d0;
+  --ring: #e5402b;
+
+  --chart-1: #e5402b;
+  --chart-2: #1b2e36;
+  --chart-3: #17794f;
+  --chart-4: #e3a03a;
+  --chart-5: #8a9aa0;
+
+  --sidebar: var(--ink);
+  --sidebar-foreground: var(--ink-foreground);
+  --sidebar-primary: var(--brand);
+  --sidebar-ring: var(--brand);
+
+  --radius: 0.875rem;           /* cards 14px; controls use rounded-lg (10px) */
+  --font-sans: 'DM Sans', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* AppKit flips to dark under prefers-color-scheme; the app is light unless the
+   user picks Dark (the `.dark` class). Re-assert the light surfaces here. */
+@media (prefers-color-scheme: dark) {
+  :root:root {
+    --background: #f5f4f0;
+    --foreground: #1b2b32;
+    --card: #ffffff;
+    --card-foreground: #1b2b32;
+    --popover: #ffffff;
+    --popover-foreground: #1b2b32;
+    --primary: var(--brand-strong);
+    --primary-foreground: #ffffff;
+    --secondary: #efede8;
+    --secondary-foreground: #1b2b32;
+    --muted: #f1efea;
+    --muted-foreground: #5e6b70;
+    --accent: #f1efea;
+    --accent-foreground: #1b2b32;
+    --border: #e6e2db;
+    --input: #dcd8d0;
+    --ring: #e5402b;
+  }
+}
+
+:root:root.dark {
+  --ink: #0f1c22;
+  --ink-2: #1f323b;
+  --ink-foreground: #eef0ee;
+  --ink-muted: #8fa1a8;
+  --brand: #f05a45;
+  --brand-strong: #e5482f;
+  --brand-soft: #3a1f1b;
+  --brand-soft-foreground: #ff9b8b;
+
+  --success: #2fa874;
+  --success-soft: #16352a;
+  --success-soft-foreground: #6fd6a6;
+  --warning: #e8ab4a;
+  --warning-soft: #3a2d14;
+  --warning-soft-foreground: #f1c27a;
+  --danger-soft: #3a1f1b;
+  --danger-soft-foreground: #ff9b8b;
+
+  --background: #141f24;
+  --foreground: #e8ebea;
+  --card: #1a272d;
+  --card-foreground: #e8ebea;
+  --popover: #1a272d;
+  --popover-foreground: #e8ebea;
+  --surface-sunken: #152127;
+
+  --primary: var(--brand-strong);
+  --primary-foreground: #ffffff;
+  --secondary: #24343b;
+  --secondary-foreground: #e8ebea;
+  --muted: #213037;
+  --muted-foreground: #9aa8ad;
+  --accent: #24343b;
+  --accent-foreground: #e8ebea;
+  --destructive: #e5482f;
+  --border: #2a3a41;
+  --input: #34464e;
+  --ring: #f05a45;
+
+  --chart-1: #f05a45;
+  --chart-2: #9fb7c0;
+  --chart-3: #2fa874;
+  --chart-4: #e8ab4a;
+  --chart-5: #6f8087;
+
+  --sidebar: var(--ink);
+  --sidebar-foreground: var(--ink-foreground);
+}
+
+/* Tailwind color utilities for the brand tokens: bg-ink, text-brand, bg-success-soft … */
+@theme inline {
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-foreground: var(--ink-foreground);
+  --color-ink-muted: var(--ink-muted);
+  --color-brand: var(--brand);
+  --color-brand-strong: var(--brand-strong);
+  --color-brand-soft: var(--brand-soft);
+  --color-brand-soft-foreground: var(--brand-soft-foreground);
+  --color-success-soft: var(--success-soft);
+  --color-success-soft-foreground: var(--success-soft-foreground);
+  --color-warning-soft: var(--warning-soft);
+  --color-warning-soft-foreground: var(--warning-soft-foreground);
+  --color-danger-soft: var(--danger-soft);
+  --color-danger-soft-foreground: var(--danger-soft-foreground);
+  --color-surface-sunken: var(--surface-sunken);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+}
+
+/* ── Base typography ────────────────────────────────────────────────────── */
+html { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+body {
+  font-family: var(--font-sans);
+  background: var(--background);
+  color: var(--foreground);
+  font-feature-settings: 'ss01';
+}
+h1, h2, h3 { letter-spacing: -0.02em; }
+code, pre, kbd, .font-mono { font-family: var(--font-mono); font-variant-ligatures: none; }
+
+button, [role="button"], a {
+  transition: background-color 140ms ease, color 140ms ease, border-color 140ms ease, box-shadow 160ms ease, opacity 140ms ease;
+}
+
+/* ── Cards: flat white surfaces with a hairline border ──────────────────── */
+[data-slot="card"] {
+  border-color: var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 1px 2px 0 rgb(27 46 54 / 0.04);
+}
+[data-slot="card-title"] { font-size: 1.0625rem; font-weight: 700; letter-spacing: -0.01em; }
+
+/* ── Buttons: 10px radius, semibold ──────────────────────────────────────── */
+[data-slot="button"] { border-radius: 0.625rem; font-weight: 600; }
+[data-slot="button"]:focus-visible { outline: 2px solid color-mix(in oklab, var(--ring) 70%, transparent); outline-offset: 2px; }
+[data-slot="button"][class*="bg-primary"] { box-shadow: 0 1px 2px 0 rgb(201 49 31 / 0.25); }
+[data-slot="button"][class~="border"]:not([class*="bg-primary"]):not([class*="bg-destructive"]) {
+  border-color: var(--input);
+  background-color: var(--card);
+  box-shadow: none;
+}
+
+/* ── Badges: soft pills ─────────────────────────────────────────────────── */
+[data-slot="badge"] { font-weight: 600; letter-spacing: 0; }
+
+/* ── Inputs / selects ───────────────────────────────────────────────────── */
+[data-slot="input"], [data-slot="select-trigger"], [data-slot="textarea"] {
+  border-radius: 0.625rem;
+  background-color: var(--card);
+  border-color: var(--input);
+}
+select { border-radius: 0.625rem; }
+
+/* ── Tabs: underline style (horizontal) ─────────────────────────────────── */
+[data-slot="tabs-list"] {
+  background: transparent;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  padding: 0;
+  height: auto;
+  gap: 0.25rem;
+  width: 100%;
+  justify-content: flex-start;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+[data-slot="tabs-trigger"] {
+  flex: 0 0 auto;
+  height: auto;
+  padding: 0.625rem 0.75rem;
+  margin-bottom: -1px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  color: var(--muted-foreground);
+  font-weight: 600;
+  box-shadow: none !important;
+  background: transparent !important;
+}
+[data-slot="tabs-trigger"]:hover { color: var(--foreground); }
+[data-slot="tabs-trigger"][data-state="active"] {
+  color: var(--foreground);
+  border-bottom-color: var(--brand);
+}
+
+/* ── Tables: uppercase tracked headers, hairline rows ───────────────────── */
+[data-slot="table-head"] {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted-foreground);
+}
+[data-slot="table-row"] { border-color: var(--border); }
+tbody tr { transition: background-color 120ms ease; }
+tbody tr:hover { background: color-mix(in oklab, var(--muted) 60%, transparent); }
+
+/* ── Alerts ─────────────────────────────────────────────────────────────── */
+[data-slot="alert"] { border-radius: 0.75rem; }
+
+/* ── Shared utility classes (used across pages) ─────────────────────────── */
+/* Uppercase micro-label: "WORKSPACE", "TARGET COVERAGE", table headers. */
+.eyebrow {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted-foreground);
+}
+/* Dark code surface (generated SQL, example SQL). */
+.code-surface {
+  background: var(--ink);
+  color: #e8ecea;
+  border-radius: 0.75rem;
+  font-family: var(--font-mono);
+}
+/* Thin scrollbars inside dense panels. */
+.thin-scroll { scrollbar-width: thin; scrollbar-color: color-mix(in oklab, var(--muted-foreground) 40%, transparent) transparent; }
+
+/* Search field inside dropdown popovers: the wrapper row draws the divider, so the
+   input itself gets no border/ring (avoids a red focus box inside the menu). */
+[data-slot="command-input"] { border: 0 !important; box-shadow: none !important; outline: none !important; background: transparent !important; }

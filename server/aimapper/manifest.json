@@ -1,0 +1,11 @@
+{
+  "$schema": "https://databricks.github.io/appkit/schemas/plugin-manifest.schema.json",
+  "name": "aimapper",
+  "displayName": "AI Mapper",
+  "description": "Target-driven source-to-target SQL schema mapper: UC discovery, LLM attribute matching, JOIN SQL generation, target-schema validation, history and references",
+  "resources": {
+    "required": [],
+    "optional": []
+  },
+  "version": "0.1.0"
+}

@@ -1,0 +1,59 @@
+bundle:
+  name: aimapper
+
+# All environment-specific values are bundle variables — nothing workspace-specific
+# is committed. Override them at deploy time with `--var` or a git-ignored
+# `.databricks/bundle/default/variable-overrides.json` (see README).
+variables:
+  sql_warehouse_id:
+    description: SQL Warehouse ID the app runs statements against (required).
+  serving_endpoint_name:
+    description: Chat LLM serving endpoint the app is granted CAN_QUERY on.
+    default: databricks-claude-sonnet-4-5
+
+resources:
+  apps:
+    app:
+      name: "aimapper"
+      description: "Target-driven source-to-target SQL schema mapper with LLM attribute discovery and target-schema validation"
+      source_code_path: ./
+      # OBO scopes: statement execution on the warehouse (sql), UC listing, and
+      # serving queries all run on-behalf-of the signed-in user. Without `sql`
+      # the app falls back to its service principal for statement execution and
+      # hits INSUFFICIENT_PERMISSIONS on the user's tables.
+      user_api_scopes:
+        - sql
+        - serving.serving-endpoints
+        - catalog.catalogs
+        - catalog.schemas
+        - catalog.tables
+        # `files` lets the References page read/write reference PDFs in the
+        # reference_docs UC volume on-behalf-of the user (Knowledge Assistant).
+        - files
+        # `dashboards.genie` lets the Ask Genie assistant start/poll Genie
+        # conversations on-behalf-of the signed-in user (AIMAPPER_GENIE_SPACE_ID).
+        - dashboards.genie
+        # Role assignment grants resource permissions AS THE SIGNED-IN ADMIN (Admin →
+        # Roles): app, Genie space, KA endpoint, warehouse and Vector Search endpoint
+        # permissions go through the Permissions API; UC grants through `sql`.
+        - apps
+        - vector-search
+        - model-serving
+
+      # Resources the app is granted access to (permissions auto-granted to the
+      # app service principal on deploy).
+      resources:
+        - name: sql-warehouse
+          sql_warehouse:
+            id: ${var.sql_warehouse_id}
+            permission: CAN_USE
+        - name: serving-endpoint
+          serving_endpoint:
+            name: ${var.serving_endpoint_name}
+            permission: CAN_QUERY
+
+targets:
+  default:
+    default: true
+    # Workspace host is NOT committed — it comes from your Databricks CLI auth
+    # (`-p <profile>` or DATABRICKS_HOST), keeping this repo workspace-agnostic.
