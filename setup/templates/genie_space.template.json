@@ -1,0 +1,249 @@
+{
+ "version": 2,
+ "config": {
+  "sample_questions": [
+   {
+    "id": "a0000000000000000000000000000001",
+    "question": [
+     "Why were some source tables skipped during discovery for my latest run?"
+    ]
+   },
+   {
+    "id": "a0000000000000000000000000000002",
+    "question": [
+     "How many tokens and how much time did each step take?"
+    ]
+   },
+   {
+    "id": "a0000000000000000000000000000003",
+    "question": [
+     "Which examples did retrieval use for SQL generation?"
+    ]
+   },
+   {
+    "id": "a0000000000000000000000000000004",
+    "question": [
+     "Did validation find any type mismatches or missing columns?"
+    ]
+   }
+  ]
+ },
+ "data_sources": {
+  "tables": [
+   {
+    "identifier": "{{CATALOG}}.{{SCHEMA}}.aimapper_conversion_runs",
+    "description": [
+     "Saved mapping runs: one row per (run_id, item_id) with generated SQL, validation status and approval state."
+    ],
+    "column_configs": [
+     {
+      "column_name": "approval_status",
+      "description": [
+       "Review state of the saved mapping"
+      ],
+      "synonyms": [
+       "approval",
+       "review status"
+      ],
+      "enable_format_assistance": true,
+      "enable_entity_matching": true
+     },
+     {
+      "column_name": "domain",
+      "description": [
+       "Source system (e.g. Epic)"
+      ],
+      "synonyms": [
+       "source system"
+      ],
+      "enable_format_assistance": true,
+      "enable_entity_matching": true
+     },
+     {
+      "column_name": "generated_sql",
+      "description": [
+       "Saved mapping SQL"
+      ]
+     },
+     {
+      "column_name": "mappings_json",
+      "description": [
+       "JSON attribute mappings for the run"
+      ]
+     },
+     {
+      "column_name": "status",
+      "description": [
+       "Validation outcome: SUCCESS, WARNINGS, FAILED or SKIPPED"
+      ],
+      "synonyms": [
+       "validation status"
+      ],
+      "enable_format_assistance": true,
+      "enable_entity_matching": true
+     },
+     {
+      "column_name": "target_table",
+      "description": [
+       "target entity"
+      ],
+      "synonyms": [
+       "target"
+      ],
+      "enable_format_assistance": true,
+      "enable_entity_matching": true
+     },
+     {
+      "column_name": "validation_report",
+      "description": [
+       "JSON validation report (column diffs)"
+      ]
+     }
+    ]
+   },
+   {
+    "identifier": "{{CATALOG}}.{{SCHEMA}}.aimapper_feedback",
+    "description": [
+     "Thumbs up/down votes on target-to-source column picks; steers future discovery."
+    ],
+    "column_configs": [
+     {
+      "column_name": "vote",
+      "description": [
+       "up or down"
+      ],
+      "synonyms": [
+       "thumbs"
+      ],
+      "enable_format_assistance": true,
+      "enable_entity_matching": true
+     }
+    ]
+   },
+   {
+    "identifier": "{{CATALOG}}.{{SCHEMA}}.aimapper_run_steps",
+    "description": [
+     "Per-step telemetry for mapping runs. trace_id groups the steps of one interaction; run_id/item_id link to aimapper_conversion_runs after save. details is a JSON string with step-specific data (e.g. discovery: tablesSelected, tablesSearched, skippedTables, batches, failedBatches, ranking; retrieval: method, examplesFound, examples; generation: promptChars, examplesUsed, referenceUsed, finishReason, outputTruncated; validation: compileOk, status, matched, typeMismatch, missing, extra)."
+    ],
+    "column_configs": [
+     {
+      "column_name": "details",
+      "description": [
+       "JSON with step-specific structured data; parse with get_json_object or from_json"
+      ]
+     },
+     {
+      "column_name": "duration_ms",
+      "description": [
+       "Wall-clock milliseconds for the step"
+      ],
+      "synonyms": [
+       "latency",
+       "time taken"
+      ]
+     },
+     {
+      "column_name": "step",
+      "description": [
+       "Pipeline step: discovery, retrieval, generation or validation"
+      ],
+      "synonyms": [
+       "stage",
+       "phase"
+      ],
+      "enable_format_assistance": true,
+      "enable_entity_matching": true
+     },
+     {
+      "column_name": "total_tokens",
+      "description": [
+       "LLM tokens used by the step"
+      ],
+      "synonyms": [
+       "tokens"
+      ]
+     },
+     {
+      "column_name": "trace_id",
+      "description": [
+       "Groups related steps of one user interaction"
+      ]
+     }
+    ]
+   },
+   {
+    "identifier": "{{CATALOG}}.{{SCHEMA}}.target_schema",
+    "description": [
+     "target contract: one row per target column of each target entity (target_table)."
+    ],
+    "column_configs": [
+     {
+      "column_name": "target_table",
+      "description": [
+       "target entity name"
+      ],
+      "synonyms": [
+       "target",
+       "entity"
+      ],
+      "enable_format_assistance": true,
+      "enable_entity_matching": true
+     }
+    ]
+   }
+  ]
+ },
+ "instructions": {
+  "text_instructions": [
+   {
+    "id": "b0000000000000000000000000000001",
+    "content": [
+     "## PURPOSE\n",
+     "- Explain AI Mapper runs to mapping analysts: why discovery picked or skipped source tables, which examples retrieval used, how generation and validation went, and token/timing usage.\n",
+     "\n",
+     "## DISAMBIGUATION\n",
+     "- Questions often arrive with a session scope (target table, trace_id, item_ids). Always filter aimapper_run_steps by the given trace_id, and aimapper_conversion_runs by the given item_id values.\n",
+     "- \"Why\" questions about a run are answered from aimapper_run_steps.details for the matching step.\n",
+     "\n",
+     "## DATA QUALITY NOTES\n",
+     "- aimapper_run_steps.domain and project_id can be NULL; do not filter on them when a trace_id is given.\n",
+     "- run_id/item_id in aimapper_run_steps are only populated after the run is saved.\n",
+     "\n",
+     "## Instructions you must follow when providing summaries\n",
+     "- State which trace_id or run_id the answer is based on."
+    ]
+   }
+  ],
+  "example_question_sqls": [
+   {
+    "id": "c0000000000000000000000000000001",
+    "question": [
+     "Show the steps for a trace with duration and tokens"
+    ],
+    "sql": [
+     "SELECT aimapper_run_steps.step, aimapper_run_steps.created_at, aimapper_run_steps.duration_ms, aimapper_run_steps.total_tokens, aimapper_run_steps.endpoint_name\n",
+     "FROM {{CATALOG}}.{{SCHEMA}}.aimapper_run_steps\n",
+     "WHERE aimapper_run_steps.trace_id = (SELECT latest.trace_id FROM {{CATALOG}}.{{SCHEMA}}.aimapper_run_steps AS latest ORDER BY latest.created_at DESC LIMIT 1)\n",
+     "ORDER BY aimapper_run_steps.created_at"
+    ],
+    "usage_guidance": [
+     "Use for timing/token breakdowns of one interaction."
+    ]
+   },
+   {
+    "id": "c0000000000000000000000000000002",
+    "question": [
+     "Which tables were skipped in discovery and how many batches ran?"
+    ],
+    "sql": [
+     "SELECT aimapper_run_steps.target_table, get_json_object(aimapper_run_steps.details, '$.tablesSelected') AS tables_selected, get_json_object(aimapper_run_steps.details, '$.tablesSearched') AS tables_searched, get_json_object(aimapper_run_steps.details, '$.batches') AS batches, get_json_object(aimapper_run_steps.details, '$.skippedTables') AS skipped_tables\n",
+     "FROM {{CATALOG}}.{{SCHEMA}}.aimapper_run_steps\n",
+     "WHERE aimapper_run_steps.step = 'discovery' AND aimapper_run_steps.trace_id = (SELECT latest.trace_id FROM {{CATALOG}}.{{SCHEMA}}.aimapper_run_steps AS latest ORDER BY latest.created_at DESC LIMIT 1)"
+    ],
+    "usage_guidance": [
+     "Use for discovery pre-filter / batching questions; details is JSON."
+    ]
+   }
+  ]
+ }
+}

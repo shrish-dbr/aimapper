@@ -2,7 +2,7 @@
 -- enrollment, claim, claim_line, pharmacy_claim, prior_authorization.
 -- Idempotent: clears existing rows for these tables before inserting.
 --
--- Easiest: run `python setup/run_setup.py --catalog <your_catalog>`. To run by
+-- Normally run by the installer (python3 setup/install.py install). To run by
 -- hand instead, replace `your_catalog` below with your catalog name.
 USE CATALOG your_catalog;
 USE SCHEMA aimapper;

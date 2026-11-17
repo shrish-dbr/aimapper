@@ -1,7 +1,7 @@
 -- Reference-document grounding: the app parses PDFs in
 -- the reference_docs volume with ai_parse_document, chunks them (server/aimapper/references.ts)
 -- and writes them here; a Vector Search Delta Sync index embeds `embed_text`.
--- Create the index with setup/create_reference_index.sh after this table exists.
+-- The installer creates the Vector Search index on this table.
 USE CATALOG your_catalog;
 USE SCHEMA aimapper;
 

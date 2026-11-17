@@ -651,8 +651,8 @@ function ReferenceDocsTab({ onCount }: { onCount: (n: number) => void }) {
         {notConfigured && (
           <div className="rounded-xl bg-warning-soft px-4 py-3 text-sm text-warning-soft-foreground">
             Reference grounding isn&apos;t configured yet, so uploaded documents are not used to ground mappings. An admin can
-            enable it by running <code className="font-mono">setup/create_reference_index.sh</code> and setting{' '}
-            <code className="font-mono">AIMAPPER_DOCS_INDEX</code>. You can still upload files to the volume below.
+            enable it by running the installer (<code className="font-mono">python3 setup/install.py install</code>). You can
+            still upload files to the volume below.
           </div>
         )}
 

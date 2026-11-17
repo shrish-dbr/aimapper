@@ -6,7 +6,7 @@
 -- Same "dirty data" style as before (raw STRINGs, mixed date formats, punctuation,
 -- free-text codes) so real casts/transforms are exercised. Safe to skip in prod.
 --
--- Easiest: run `python setup/run_setup.py --catalog <your_catalog>`. To run by
+-- Normally run by the installer (python3 setup/install.py install). To run by
 -- hand, replace `your_catalog` with your catalog name. Names are fully qualified
 -- with the source schema `aimapper_source`, so no session context is needed.
 CREATE SCHEMA IF NOT EXISTS your_catalog.aimapper_source;

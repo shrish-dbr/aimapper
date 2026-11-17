@@ -1,7 +1,7 @@
 -- Retrieval corpus for semantic (Vector Search) few-shot retrieval.
 --
 -- Unions APPROVED mapping examples + APPROVED history runs into one text-per-row
--- corpus. A Delta Sync Vector Search index (see setup/create_vector_index.sh)
+-- corpus. A Delta Sync Vector Search index (created by setup/install.py)
 -- embeds the `content` column so mapping generation can retrieve the most
 -- semantically-similar prior mappings — ranked over the WHOLE corpus, not just a
 -- recency window — hard-filtered by the current project (or, with Cross-Project
@@ -9,7 +9,7 @@
 --
 -- Change Data Feed is REQUIRED for a CONTINUOUS Delta Sync index to pick up changes.
 --
--- Easiest: run `python setup/run_setup.py --catalog <your_catalog>`. To run by
+-- Normally run by the installer (python3 setup/install.py install). To run by
 -- hand, replace `your_catalog` with your catalog (and `aimapper` if you changed
 -- the schema).
 USE CATALOG your_catalog;
@@ -31,7 +31,7 @@ TBLPROPERTIES (delta.enableChangeDataFeed = true)
 COMMENT 'Vector Search source corpus: approved mapping examples + approved history';
 
 -- Initial backfill from the base tables (idempotent full replace).
-INSERT OVERWRITE aimapper_retrieval_corpus
+INSERT OVERWRITE aimapper_retrieval_corpus BY NAME
 SELECT concat('example:', example_id) AS id, 'example' AS kind,
        coalesce(domain, 'Epic') AS domain,
        coalesce(project_id, concat('default::', lower(coalesce(domain, 'Epic')))) AS project_id,

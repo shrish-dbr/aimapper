@@ -4,7 +4,7 @@
 -- any missing table at runtime, but pre-creating them here means end users (who run
 -- the app on-behalf-of themselves) don't need CREATE TABLE on the schema.
 --
--- Easiest: run `python setup/run_setup.py --catalog <your_catalog>` which
+-- Normally run by the installer (python3 setup/install.py install), which
 -- substitutes your catalog/schema and runs all setup files for you.
 -- To run by hand instead, replace `your_catalog` below with your catalog name
 -- (and `aimapper` with your schema if you changed it).
@@ -248,3 +248,29 @@ CREATE TABLE IF NOT EXISTS aimapper_permission_grants (
        )
 USING DELTA
 COMMENT 'Resource permissions granted by AI Mapper role assignments';
+
+-- ---------------------------------------------------------------------------
+-- Per-step run log (discovery → retrieval → generation → validation): timing,
+-- tokens and details for each mapping step. The app also creates this lazily; it
+-- is created here so the Genie space (which reads it) can be set up at install.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS aimapper_run_steps (
+  step_id STRING NOT NULL COMMENT 'UUID per logged step',
+  trace_id STRING COMMENT 'Groups related steps (discovery→retrieval→generation→validation)',
+  run_id STRING COMMENT 'Linked to aimapper_conversion_runs.run_id after save',
+  item_id STRING COMMENT 'Linked to aimapper_conversion_runs.item_id after save',
+  target_table STRING NOT NULL COMMENT 'target entity',
+  step STRING NOT NULL COMMENT 'discovery | retrieval | generation | validation',
+  domain STRING COMMENT 'Source system (Epic, Cerner, …)',
+  project_id STRING COMMENT 'Project scope',
+  created_at TIMESTAMP NOT NULL COMMENT 'When the step started',
+  created_by STRING,
+  duration_ms BIGINT,
+  endpoint_name STRING,
+  prompt_tokens BIGINT,
+  completion_tokens BIGINT,
+  total_tokens BIGINT,
+  details STRING COMMENT 'JSON: step-specific details'
+)
+USING DELTA
+COMMENT 'AI Mapper per-step run log';
