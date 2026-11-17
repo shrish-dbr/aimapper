@@ -17,8 +17,6 @@ import {
   DropdownMenuTrigger,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
   Checkbox,
   Slider,
 } from '@databricks/appkit-ui/react';
@@ -26,7 +24,7 @@ import { Wand2, Search, Sparkles, CheckCircle2, Save, Star, Download, TablePrope
 import { api, LARGE_SELECTION_WARN, type AttributeMapping, type TargetEntity, type SourceTable, type RunItem, type ValidationReport, type Project, type ReferenceSource } from '../../lib/aimapperApi';
 import { setGenieSession } from '../../lib/genieSession';
 import { useRole } from '../../lib/roleContext';
-import { SearchableSelect } from './SearchableSelect';
+import { SearchableSelect, SearchableMultiSelect } from './SearchableSelect';
 import { PageHeader, Panel, StepHeading, StatusPill, Mono, SearchField } from '../../components/studio';
 import { statusTone, statusLabel } from '../../lib/display';
 
@@ -721,26 +719,6 @@ export function MapperPage() {
     }
   }
 
-  // Toggle a single target in/out of the bulk selection.
-  function toggleTarget(name: string) {
-    setSelectedTargets((prev) => {
-      const next = new Set(prev);
-      if (next.has(name)) next.delete(name);
-      else next.add(name);
-      return next;
-    });
-  }
-
-  // Toggle a source table in/out of the search set.
-  function toggleSourceTable(name: string) {
-    setSelectedTables((prev) => {
-      const next = new Set(prev);
-      if (next.has(name)) next.delete(name);
-      else next.add(name);
-      return next;
-    });
-  }
-
   // Load the data preview for one bulk result row (on expand).
   async function loadBulkPreview(target: string, sql: string) {
     setBulkResults((prev) => prev.map((r) => (r.target === target ? { ...r, previewing: true } : r)));
@@ -1417,43 +1395,24 @@ export function MapperPage() {
           {/* Source tables multi-select (all selected by default; deselect to narrow). */}
           <div className="space-y-1.5 min-w-0">
             <Label className="text-[0.8125rem] font-semibold">Source tables</Label>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild disabled={!tables.length}>
-                <Button variant="outline" className="h-10 w-full justify-between font-normal">
-                  <span className="truncate">
-                    {!tables.length
-                      ? 'Select a schema first'
-                      : selectedTables.size === 0
-                      ? 'Select source tables'
-                      : selectedTables.size === tables.length
-                      ? `All ${tables.length} tables`
-                      : `${selectedTables.size} of ${tables.length} selected`}
-                  </span>
-                  <ChevronDown className="h-4 w-4 ml-1.5 opacity-50 shrink-0" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="w-72 max-h-80 overflow-y-auto">
-                <div className="flex items-center justify-between px-2 py-1.5">
-                  <DropdownMenuLabel className="p-0">Tables to search</DropdownMenuLabel>
-                  <div className="flex items-center gap-1">
-                    <Button variant="ghost" size="sm" className="h-6 text-xs px-1.5" onClick={() => setSelectedTables(new Set(tables))}>All</Button>
-                    <Button variant="ghost" size="sm" className="h-6 text-xs px-1.5" onClick={() => setSelectedTables(new Set())}>None</Button>
-                  </div>
-                </div>
-                <DropdownMenuSeparator />
-                {tables.map((t) => (
-                  <DropdownMenuItem
-                    key={t}
-                    className="gap-2"
-                    onSelect={(e) => e.preventDefault()}
-                    onClick={() => toggleSourceTable(t)}
-                  >
-                    <Checkbox checked={selectedTables.has(t)} className="pointer-events-none" />
-                    <span className="truncate font-mono text-xs" title={t}>{t}</span>
-                  </DropdownMenuItem>
-                ))}
-              </DropdownMenuContent>
-            </DropdownMenu>
+            <SearchableMultiSelect
+              values={selectedTables}
+              onValuesChange={setSelectedTables}
+              disabled={!tables.length}
+              title="Tables to search"
+              searchPlaceholder="Search tables…"
+              itemClassName="font-mono text-xs"
+              summary={
+                !tables.length
+                  ? 'Select a schema first'
+                  : selectedTables.size === 0
+                  ? 'Select source tables'
+                  : selectedTables.size === tables.length
+                  ? `All ${tables.length} tables`
+                  : `${selectedTables.size} of ${tables.length} selected`
+              }
+              options={tables.map((t) => ({ value: t, label: t }))}
+            />
           </div>
         </div>
 
@@ -1463,41 +1422,23 @@ export function MapperPage() {
             <Label className="text-[0.8125rem] font-semibold">Target entity</Label>
             {bulkMode ? (
               // Multi-select: pick/deselect which targets the bulk run maps.
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild disabled={!targetNames.length || bulkRunning}>
-                  <Button variant="outline" className="h-10 w-full justify-between font-normal">
-                    <span className="truncate">
-                      {selectedTargets.size === 0
-                        ? 'Select targets'
-                        : selectedTargets.size === targetNames.length
-                        ? `All ${targetNames.length} targets`
-                        : `${selectedTargets.size} of ${targetNames.length} selected`}
-                    </span>
-                    <ChevronDown className="h-4 w-4 ml-1.5 opacity-50 shrink-0" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="start" className="w-64 max-h-80 overflow-y-auto">
-                  <div className="flex items-center justify-between px-2 py-1.5">
-                    <DropdownMenuLabel className="p-0">Targets to map</DropdownMenuLabel>
-                    <div className="flex items-center gap-1">
-                      <Button variant="ghost" size="sm" className="h-6 text-xs px-1.5" onClick={() => setSelectedTargets(new Set(targetNames))}>All</Button>
-                      <Button variant="ghost" size="sm" className="h-6 text-xs px-1.5" onClick={() => setSelectedTargets(new Set())}>None</Button>
-                    </div>
-                  </div>
-                  <DropdownMenuSeparator />
-                  {targetNames.map((n) => (
-                    <DropdownMenuItem
-                      key={n}
-                      className="gap-2"
-                      onSelect={(e) => e.preventDefault()}
-                      onClick={() => toggleTarget(n)}
-                    >
-                      <Checkbox checked={selectedTargets.has(n)} className="pointer-events-none" />
-                      <span className="truncate font-mono text-xs" title={n}>{n}</span>
-                    </DropdownMenuItem>
-                  ))}
-                </DropdownMenuContent>
-              </DropdownMenu>
+              <SearchableMultiSelect
+                values={selectedTargets}
+                onValuesChange={setSelectedTargets}
+                disabled={!targetNames.length || bulkRunning}
+                title="Targets to map"
+                searchPlaceholder="Search targets…"
+                contentClassName="w-64"
+                itemClassName="font-mono text-xs"
+                summary={
+                  selectedTargets.size === 0
+                    ? 'Select targets'
+                    : selectedTargets.size === targetNames.length
+                    ? `All ${targetNames.length} targets`
+                    : `${selectedTargets.size} of ${targetNames.length} selected`
+                }
+                options={targetNames.map((n) => ({ value: n, label: n }))}
+              />
             ) : (
               <SearchableSelect
                 value={targetEntity}

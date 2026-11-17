@@ -97,7 +97,7 @@ export function StepHeading({
   return (
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div className="min-w-0">
-        <h2 className="text-[1.125rem] font-bold tracking-tight">
+        <h2 className="text-[1.40625rem] font-bold tracking-tight">
           <span className="text-brand mr-1.5">{index}</span>
           {title}
         </h2>

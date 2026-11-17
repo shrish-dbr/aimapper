@@ -40,6 +40,7 @@ import {
 } from './sourceSelection.js';
 import { buildSampleContext } from './dataSampling.js'; // [DATA-SAMPLING] remove file + this import to drop the feature
 import { buildReport, diffSchema, type ResultColumn } from './validate.js';
+import { describeTargetSchemaField, resolveTargetSchemaColumns, rowsToTargetEntities } from './targetSchema.js';
 import { resolveTransition, stampsReviewer, type ApprovalAction } from './approval.js';
 import {
   planGrants,
@@ -73,7 +74,6 @@ import {
 import type {
   AttributeMapping,
   MappingExample,
-  TargetColumn,
   TargetEntity,
   RunItem,
   SourceColumn,
@@ -211,15 +211,6 @@ class ForbiddenError extends Error {
     this.name = 'ForbiddenError';
   }
 }
-
-// Columns a valid target-schema table must expose (checked on config save).
-const REQUIRED_TARGET_SCHEMA_COLUMNS = [
-  'target_table',
-  'target_column',
-  'ordinal_position',
-  'data_type',
-  'is_nullable',
-];
 
 /**
  * How few-shot retrieval is scoped for one generation.
@@ -1681,24 +1672,25 @@ export class AiMapper extends Plugin {
       return { ok: false, message: 'Expected a fully-qualified catalog.schema.table name.' };
     }
     // Read the table's columns via UC (OBO); missing/forbidden tables surface here.
-    let cols: Set<string>;
+    let cols: string[];
     try {
       const ctx = this.ctx();
       const info = await ctx.client.tables.get({ full_name: fqTable });
-      cols = new Set((info.columns ?? []).map((c) => (c.name ?? '').toLowerCase()));
+      cols = (info.columns ?? []).map((c) => c.name ?? '').filter(Boolean);
     } catch (e) {
       return { ok: false, message: `Cannot read ${fqTable}: ${errMsg(e)}` };
     }
-    const missing = REQUIRED_TARGET_SCHEMA_COLUMNS.filter((c) => !cols.has(c));
+    const { columns, missing } = resolveTargetSchemaColumns(cols);
     if (missing.length) {
       return {
         ok: false,
-        message: `Not a target-schema table — missing required column(s): ${missing.join(', ')}.`,
+        message: `Not a target-schema table — no column for: ${missing.map(describeTargetSchemaField).join('; ')}. Other columns are optional.`,
       };
     }
-    // Confirm it actually has target rows we can read.
+    // Confirm it actually has target rows we can read (using whichever column holds the table name).
+    const tableCol = '`' + columns.target_table!.replace(/`/g, '``') + '`';
     try {
-      const rows = await this.runQuery(`SELECT COUNT(DISTINCT target_table) AS n FROM ${fqTable}`);
+      const rows = await this.runQuery(`SELECT COUNT(DISTINCT ${tableCol}) AS n FROM ${fqTable}`);
       const n = intOr(rows[0]?.n ?? null, 0);
       if (n === 0) return { ok: false, message: 'Table has the right columns but contains no target entities.' };
       return { ok: true, message: `Valid target-schema table with ${n} target entit${n === 1 ? 'y' : 'ies'}.`, targetCount: n };
@@ -1717,32 +1709,10 @@ export class AiMapper extends Plugin {
 
   private async loadTargetEntitiesUncached(versionId?: string): Promise<TargetEntity[]> {
     const targetSchemaTable = await this.resolveTargetSchemaTable(versionId);
-    const rows = await this.runQuery(
-      `SELECT target_table, target_column, ordinal_position, data_type, data_length,
-              numeric_precision, numeric_scale, is_nullable, is_primary_key, description, transform_hint
-       FROM ${targetSchemaTable} ORDER BY target_table, ordinal_position`,
-    );
-    const byTable = new Map<string, TargetColumn[]>();
-    for (const r of rows) {
-      const col: TargetColumn = {
-        target_table: r.target_table ?? '',
-        target_column: r.target_column ?? '',
-        ordinal_position: intOr(r.ordinal_position, 0),
-        data_type: r.data_type ?? 'STRING',
-        data_length: intOrNull(r.data_length),
-        numeric_precision: intOrNull(r.numeric_precision),
-        numeric_scale: intOrNull(r.numeric_scale),
-        is_nullable: String(r.is_nullable).toLowerCase() === 'true',
-        is_primary_key: r.is_primary_key == null ? null : String(r.is_primary_key).toLowerCase() === 'true',
-        description: r.description,
-        transform_hint: r.transform_hint,
-      };
-      if (!byTable.has(col.target_table)) byTable.set(col.target_table, []);
-      byTable.get(col.target_table)!.push(col);
-    }
-    return [...byTable.entries()]
-      .map(([target_table, columns]) => ({ target_table, columns }))
-      .sort((a, b) => a.target_table.localeCompare(b.target_table));
+    // SELECT *: only the table name, column name and data type are required (under any
+    // accepted column name); other contract fields are used when the table has them.
+    const rows = await this.runQuery(`SELECT * FROM ${targetSchemaTable}`);
+    return rowsToTargetEntities(rows);
   }
 
   private async sourceSchema(catalog: string, schema: string, table: string): Promise<SourceTable> {
@@ -4381,11 +4351,6 @@ function num(v: number | null | undefined): string {
 function intOr(v: string | null, fallback: number): number {
   const n = v == null || v === '' ? NaN : Number(v);
   return Number.isNaN(n) ? fallback : Math.trunc(n);
-}
-
-function intOrNull(v: string | null): number | null {
-  const n = v == null || v === '' ? NaN : Number(v);
-  return Number.isNaN(n) ? null : Math.trunc(n);
 }
 
 function rowToExample(r: Record<string, string | null>): MappingExample {
