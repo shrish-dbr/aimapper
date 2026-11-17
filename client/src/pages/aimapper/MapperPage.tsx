@@ -1792,8 +1792,7 @@ const MAPPER_STEPS: { n: 1 | 2 | 3 | 4; label: string }[] = [
   { n: 4, label: 'SQL & validate' },
 ];
 
-/** Horizontal 4-step progress indicator (text and badges 25% above the base sizes:
- * 0.8125rem labels, 0.6875rem numbers, 1.5rem badges). Read-only: highlights the current step and
+/** Horizontal 4-step progress indicator. Read-only: highlights the current step and
  * scrolls to a section when clicked (no state changes). */
 function MapperStepper({ current }: { current: 1 | 2 | 3 | 4 }) {
   const jump = (n: number) => document.getElementById(`mapper-step-${n}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -1808,16 +1807,16 @@ function MapperStepper({ current }: { current: 1 | 2 | 3 | 4 }) {
             type="button"
             onClick={() => jump(s.n)}
             aria-current={isCurrent ? 'step' : undefined}
-            className={`flex items-center gap-2.5 rounded-[0.625rem] px-3 py-2 text-left text-[1.015625rem] font-semibold transition-colors ${
+            className={`flex items-center gap-2.5 rounded-[0.625rem] px-3 py-2 text-left text-[0.8125rem] font-semibold transition-colors ${
               isCurrent ? 'bg-brand-soft text-brand-soft-foreground' : 'text-foreground hover:bg-muted'
             }`}
           >
             <span
-              className={`flex h-[1.875rem] w-[1.875rem] shrink-0 items-center justify-center rounded-full text-[0.859375rem] font-bold ${
+              className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[0.6875rem] font-bold ${
                 isCurrent ? 'bg-brand text-white' : isDone ? 'bg-ink text-ink-foreground' : 'bg-muted text-muted-foreground'
               }`}
             >
-              {isDone ? <Check className="h-[1.09375rem] w-[1.09375rem]" /> : s.n}
+              {isDone ? <Check className="h-3.5 w-3.5" /> : s.n}
             </span>
             <span className="truncate">{s.label}</span>
           </button>
