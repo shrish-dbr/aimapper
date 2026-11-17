@@ -413,6 +413,20 @@ export class AiMapper extends Plugin {
     // receive workspace permissions (app, Genie, …) but no UC grants.
     const workspaceLocal = kind === 'group' && (await this.isWorkspaceLocalGroup(principal));
     const planned: PlannedGrant[] = role ? planGrants(role, ids) : [];
+    // An endpoint the app couldn't look up is left out of the plan — say so rather than
+    // silently skipping it. The installer grants endpoint access to the role GROUPS only.
+    const vsLookupFailed = !!(role && VS_ENDPOINT && !ids.vsEndpointId);
+    if (vsLookupFailed) {
+      results.push({
+        resource: 'Vector Search endpoint',
+        access: role === 'admin' ? 'CAN_MANAGE' : 'CAN_USE',
+        status: 'skipped',
+        detail:
+          kind === 'group'
+            ? `Couldn't look up endpoint ${VS_ENDPOINT} with your sign-in — the installer (setup/install.py) grants the role groups this.`
+            : `Couldn't look up endpoint ${VS_ENDPOINT} with your sign-in — grant it in Compute → Vector Search, or assign the role through its group.`,
+      });
+    }
     const desired = workspaceLocal ? planned.filter((g) => g.kind === 'acl') : planned;
     if (workspaceLocal) {
       for (const g of planned.filter((x) => x.kind === 'uc')) {
@@ -450,6 +464,9 @@ export class AiMapper extends Plugin {
     for (const row of ledger) {
       const key = String(row.grant_key);
       if (desiredKeys.has(key)) continue;
+      // The endpoint is missing from the plan only because its lookup failed, not because
+      // the role no longer needs it — keep the existing grant.
+      if (vsLookupFailed && row.kind === 'acl' && String(row.object_type ?? '') === 'vector-search-endpoints') continue;
       const objectType = String(row.object_type ?? '');
       const objectId = String(row.object_id ?? '');
       const privilege = String(row.privilege ?? '');
@@ -497,9 +514,9 @@ export class AiMapper extends Plugin {
         }
       } catch (e) {
         // App + Genie ACLs need the `access-management` scope, which apps can't request —
-        // setup/08_role_groups.py sets those two with the admin's CLI login instead.
+        // setup/install.py sets those two with the admin's CLI login instead.
         if (missingScope(errMsg(e)) === 'access-management') {
-          results.push({ resource: g.label, access: g.kind === 'acl' ? g.level : g.privilege, status: 'skipped', detail: 'Set by setup/08_role_groups.py (an app sign-in can’t change this permission).' });
+          results.push({ resource: g.label, access: g.kind === 'acl' ? g.level : g.privilege, status: 'skipped', detail: 'Set by the installer, setup/install.py (an app sign-in can’t change this permission).' });
           continue;
         }
         results.push({ resource: g.label, access: g.kind === 'acl' ? g.level : g.privilege, status: 'failed', detail: errMsg(e) });
@@ -1002,7 +1019,7 @@ export class AiMapper extends Plugin {
   // Membership is changed through the workspace's account-SCIM proxy as the app
   // SERVICE PRINCIPAL: user sign-in tokens can't carry the `scim` scope, so the admin's
   // own token can't edit groups. The SP must be a Group manager of the three groups
-  // (setup/08_role_groups.sh); routes check the caller is an app admin first.
+  // (setup/install.py); routes check the caller is an app admin first.
 
   /** Account SCIM call via the workspace proxy. Uses fetch (not apiClient) because the
    * SDK drops PATCH bodies. */
@@ -1088,7 +1105,7 @@ export class AiMapper extends Plugin {
     const ids = await this.roleGroupIds();
     const missing = ROLE_ORDER.filter((r) => !ids[r]);
     if (missing.length) {
-      throw new Error(`Role group(s) not found: ${missing.map((r) => ROLE_GROUPS[r]).join(', ')}. Run setup/08_role_groups.sh first.`);
+      throw new Error(`Role group(s) not found: ${missing.map((r) => ROLE_GROUPS[r]).join(', ')}. Run setup/install.py first.`);
     }
     const who = await this.findAccountPrincipal(name, kind);
     if (!who) {
@@ -1112,7 +1129,7 @@ export class AiMapper extends Plugin {
       } catch (e) {
         const msg = errMsg(e);
         const hint = /403|permission|not authorized|forbidden/i.test(msg)
-          ? ' — the app service principal must be a Group manager of the role groups (setup/08_role_groups.sh).'
+          ? ' — the app service principal must be a Group manager of the role groups (setup/install.py).'
           : '';
         throw new Error(`Couldn't ${verb === 'added to' ? 'add' : 'remove'} ${name} ${verb === 'added to' ? 'to' : 'from'} ${ROLE_GROUPS[r]}: ${msg}${hint}${done.length ? ` (already ${done.join(', ')})` : ''}`);
       }
@@ -4230,8 +4247,8 @@ VALUES (:example_id, :target_table, :source_signature, :source_columns, :generat
 
     // ── 23. Genie Agent (Ask Genie panel) ──────────────────────────────
     // Returns the space id so the client knows whether to show the panel.
-    get('genie-config', '/genie-config', async () => {
-      return { enabled: GENIE_SPACE_ID.length > 0, spaceId: GENIE_SPACE_ID || null };
+    get('genie-config', '/genie-config', () => {
+      return Promise.resolve({ enabled: GENIE_SPACE_ID.length > 0, spaceId: GENIE_SPACE_ID || null });
     });
 
     // Start a new Genie conversation or continue an existing one.

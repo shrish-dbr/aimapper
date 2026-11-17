@@ -60,8 +60,8 @@ export function levelCovers(objectType: string, have: string | null | undefined,
 }
 
 // Tables each role writes through the app (derived from the server routes).
-const VIEWER_WRITE_TABLES = ['aimapper_conversion_runs', 'aimapper_run_steps', 'aimapper_feedback', 'aimapper_user_prefs'];
-const EDITOR_WRITE_TABLES = [
+export const VIEWER_WRITE_TABLES = ['aimapper_conversion_runs', 'aimapper_run_steps', 'aimapper_feedback', 'aimapper_user_prefs'];
+export const EDITOR_WRITE_TABLES = [
   ...VIEWER_WRITE_TABLES,
   'mapping_examples',
   'aimapper_retrieval_corpus',

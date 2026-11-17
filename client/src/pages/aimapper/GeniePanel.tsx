@@ -178,10 +178,10 @@ export function GeniePanel({ targetTable, domain, projectId, onClose }: GeniePan
   }, [loading, conversationId, targetTable, domain, projectId]);
 
   const toggleSql = (idx: number) => setExpandedSql((prev) => {
-    const s = new Set(prev); s.has(idx) ? s.delete(idx) : s.add(idx); return s;
+    const s = new Set(prev); if (s.has(idx)) s.delete(idx); else s.add(idx); return s;
   });
   const toggleData = (idx: number) => setExpandedData((prev) => {
-    const s = new Set(prev); s.has(idx) ? s.delete(idx) : s.add(idx); return s;
+    const s = new Set(prev); if (s.has(idx)) s.delete(idx); else s.add(idx); return s;
   });
 
   const suggestedQs = messages.length === 0
@@ -262,7 +262,7 @@ export function GeniePanel({ targetTable, domain, projectId, onClose }: GeniePan
       {suggestedQs.length > 0 && !loading && (
         <div style={{ padding: '4px 16px 8px', display: 'flex', flexWrap: 'wrap', gap: 6 }}>
           {suggestedQs.slice(0, 4).map((q, i) => (
-            <button key={i} onClick={() => askGenie(q)} style={{
+            <button key={i} onClick={() => void askGenie(q)} style={{
               fontSize: 11, padding: '4px 10px', borderRadius: 16, border: '1px solid var(--border)',
               background: 'var(--card)', color: 'var(--foreground)', cursor: 'pointer', whiteSpace: 'nowrap',
               overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '100%',
@@ -274,7 +274,7 @@ export function GeniePanel({ targetTable, domain, projectId, onClose }: GeniePan
       <Separator />
 
       {/* Input */}
-      <form onSubmit={(e) => { e.preventDefault(); askGenie(input); }} style={{ display: 'flex', gap: 8, padding: '10px 16px' }}>
+      <form onSubmit={(e) => { e.preventDefault(); void askGenie(input); }} style={{ display: 'flex', gap: 8, padding: '10px 16px' }}>
         <Input
           value={input}
           onChange={(e) => setInput(e.target.value)}

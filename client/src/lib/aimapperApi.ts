@@ -172,7 +172,7 @@ export type PrincipalType = 'user' | 'group';
 export interface RoleGroup {
   role: Role;
   name: string;
-  /** null = the group doesn't exist (run setup/08_role_groups.sh). */
+  /** null = the group doesn't exist (run setup/install.py). */
   id: string | null;
   members: number;
   /** Permissions the app has granted this group (0 = not applied yet). */

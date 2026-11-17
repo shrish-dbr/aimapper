@@ -7,7 +7,7 @@
 -- relevant passages at mapping time to ground attribute discovery and JOIN-SQL
 -- generation.
 --
--- Easiest: run `python setup/run_setup.py --catalog <your_catalog>`. To run by
+-- Normally run by the installer (python3 setup/install.py install). To run by
 -- hand instead, replace `your_catalog` below with your catalog name (and
 -- `aimapper` with your schema if you changed it).
 USE CATALOG your_catalog;

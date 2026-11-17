@@ -1,11 +1,13 @@
 # Databricks notebook source
-# Scheduled retrieval-index refresh for AI Mapper.
+# Scheduled search-index refresh for AI Mapper (the hourly <app-name>-retrieval-sync job,
+# defined in databricks.yml and deployed by setup/install.py).
 #
-# Rebuilds the aimapper_retrieval_corpus from the base tables (approved mapping
-# examples + approved history) and triggers a sync of the TRIGGERED Delta Sync
-# Vector Search index so its embeddings pick up the changes. Runs on serverless.
+# 1. Example search: rebuilds aimapper_retrieval_corpus from the base tables (approved
+#    mapping examples + approved history) and syncs aimapper_retrieval_index.
+# 2. Document search: syncs aimapper_reference_index (the app writes the passages itself
+#    on upload/delete/re-index; this is the safety net). Runs on serverless.
 #
-# Parameters (job widgets): catalog, schema, index_name.
+# Parameters (job widgets): catalog, schema, index_name, reference_index_name.
 
 # COMMAND ----------
 dbutils.widgets.text("catalog", "")
@@ -25,7 +27,7 @@ runs = f"{catalog}.{schema}.aimapper_conversion_runs"
 # Full-replace rebuild of the corpus (approved examples + approved history),
 # shaping the same `content` text the app's write-through builds.
 spark.sql(f"""
-INSERT OVERWRITE {corpus}
+INSERT OVERWRITE {corpus} BY NAME
 SELECT concat('example:', example_id) AS id, 'example' AS kind,
        coalesce(domain, 'Epic') AS domain,
        coalesce(project_id, concat('default::', lower(coalesce(domain, 'Epic')))) AS project_id,

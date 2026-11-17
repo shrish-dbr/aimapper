@@ -604,8 +604,8 @@ function RetrievalPanel() {
           <AlertTitle>Semantic retrieval not configured</AlertTitle>
           <AlertDescription>
             <p>
-            Using the lexical fallback. To enable Vector Search, run <Code>setup/create_vector_index.sh</Code> and set{' '}
-            <Code>AIMAPPER_VS_ENDPOINT</Code> + <Code>AIMAPPER_VS_INDEX</Code> in <Code>app.yaml</Code>.
+            Using the lexical fallback. Example search is set up by the installer: run{' '}
+            <Code>python3 setup/install.py install</Code> (it sets <Code>AIMAPPER_VS_ENDPOINT</Code> and <Code>AIMAPPER_VS_INDEX</Code>).
             </p>
           </AlertDescription>
         </Alert>
@@ -740,8 +740,8 @@ function ReferenceIndexPanel() {
           <AlertTitle>Reference grounding not configured</AlertTitle>
           <AlertDescription>
             <p>
-              Mappings aren&apos;t grounded in reference documents. To enable it, run <Code>setup/create_reference_index.sh</Code> and
-              set <Code>AIMAPPER_DOCS_INDEX</Code> in <Code>app.yaml</Code>.
+              Mappings aren&apos;t grounded in reference documents. Document search is set up by the installer: run{' '}
+              <Code>python3 setup/install.py install</Code> (it sets <Code>AIMAPPER_DOCS_INDEX</Code>).
             </p>
           </AlertDescription>
         </Alert>
@@ -1373,7 +1373,7 @@ export function AdminPage() {
           title: `${x.group} (${x.role})`,
           results: x.found
             ? x.permissions
-            : [{ resource: x.group, access: '—', status: 'failed' as const, detail: 'Group not found — run setup/08_role_groups.sh.' }],
+            : [{ resource: x.group, access: '—', status: 'failed' as const, detail: 'Group not found — run setup/install.py.' }],
         })),
       );
       await load();
@@ -1455,7 +1455,7 @@ export function AdminPage() {
           <ShieldAlert className="h-4 w-4" />
           <AlertTitle>Role groups not set up</AlertTitle>
           <AlertDescription>
-            {missingGroups.map((g) => g.name).join(', ')} {missingGroups.length === 1 ? "doesn't" : "don't"} exist yet. Run <Code>setup/08_role_groups.sh</Code> to create the groups, then click “Apply group permissions”.
+            {missingGroups.map((g) => g.name).join(', ')} {missingGroups.length === 1 ? "doesn't" : "don't"} exist yet. Run <Code>python3 setup/install.py install</Code> to create them, then click “Apply group permissions”.
           </AlertDescription>
         </Alert>
       )}
