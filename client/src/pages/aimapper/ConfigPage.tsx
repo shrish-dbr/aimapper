@@ -371,6 +371,14 @@ export function ConfigPanel({ onSaved }: { onSaved?: () => void }) {
               </div>
             </div>
 
+            <p className="text-xs text-muted-foreground">
+              Any table in any catalog and schema works if it has one row per target column with a table name, column
+              name and data type, under common names such as <Mono className="text-xs">target_table</Mono> /{' '}
+              <Mono className="text-xs">table_name</Mono>, <Mono className="text-xs">target_column</Mono> /{' '}
+              <Mono className="text-xs">column_name</Mono> and <Mono className="text-xs">data_type</Mono> /{' '}
+              <Mono className="text-xs">type</Mono>. Position, nullability, description and similar columns are used when
+              present.
+            </p>
             {chosen && <p className="text-xs text-muted-foreground">Target table: <Mono className="font-medium text-foreground text-xs">{chosen}</Mono></p>}
 
             <label className="flex items-center gap-2 text-sm cursor-pointer">
